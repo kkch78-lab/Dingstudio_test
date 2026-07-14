@@ -1,0 +1,6 @@
+{
+  "name": "원곡중 스포츠 원더풀",
+  "description": "원곡중학교 스포츠 원더풀 프로젝트 공식 통합 플랫폼. 자유, 스포츠클럽, 체육대회, 내가 바로 원곡 릴스꾼, 학생심판지원단(기자단) 소식 및 미디어 갤러리 제공.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
