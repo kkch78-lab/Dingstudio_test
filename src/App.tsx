@@ -21,6 +21,7 @@ interface Post {
   content: string;
   date: string;
   fileUrl?: string;
+  fileData?: string;
   linkUrl?: string;
   imageUrl?: string;
   videoUrl?: string;
@@ -157,9 +158,9 @@ function WongokLogo({ className = "w-20 h-20" }: { className?: string }) {
         원더풀
       </text>
       
-      {/* 7. Subtitle: 'on the' */}
+      {/* 7. Subtitle: 'WON THE' */}
       <text x="200" y="188" textAnchor="middle" className="font-serif italic font-extrabold text-[19px] fill-amber-700 tracking-wide">
-        on the
+        WON THE
       </text>
       
       {/* 8. Super bold RED-CORAL ribbon badge "FULL" */}
@@ -185,6 +186,15 @@ export default function App() {
   const [showAuthModal, setShowAuthModal] = useState<boolean>(false);
   const [selectedAuthRole, setSelectedAuthRole] = useState<'student_council' | 'admin'>('student_council');
   const [authPasscode, setAuthPasscode] = useState<string>('');
+  const [showDebugHint, setShowDebugHint] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') {
+      return window.location.search.includes('hint') || 
+             window.location.search.includes('dev') || 
+             window.location.search.includes('dn90961510');
+    }
+    return false;
+  });
+  const [labelClickCount, setLabelClickCount] = useState<number>(0);
   
   // Storage arrays
   const [posts, setPosts] = useState<Post[]>([]);
@@ -212,10 +222,12 @@ export default function App() {
   const [newPostAuthor, setNewPostAuthor] = useState<string>('');
   const [newPostContent, setNewPostContent] = useState<string>('');
   const [newPostFileUrl, setNewPostFileUrl] = useState<string>('');
+  const [newPostFileData, setNewPostFileData] = useState<string>('');
   const [newPostLinkUrl, setNewPostLinkUrl] = useState<string>('');
   const [newPostImageUrl, setNewPostImageUrl] = useState<string>('');
   const [newPostVideoUrl, setNewPostVideoUrl] = useState<string>('');
   const postImageFileInputRef = useRef<HTMLInputElement>(null);
+  const postDocumentFileInputRef = useRef<HTMLInputElement>(null);
   const [selectedRefereeSport, setSelectedRefereeSport] = useState<string>('soccer');
   const [postModalTab, setPostModalTab] = useState<'add' | 'edit'>('add');
   const [editingPostId, setEditingPostId] = useState<string | null>(null);
@@ -333,6 +345,24 @@ export default function App() {
     reader.readAsDataURL(file);
   };
 
+  const handlePostDocumentUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (file.size > 15 * 1024 * 1024) {
+      triggerHud("최대 15MB 용량 파일만 가능합니다.", "error");
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      setNewPostFileUrl(file.name);
+      setNewPostFileData(reader.result as string);
+      triggerHud(`"${file.name}" 문서가 성공적으로 첨부되었습니다.`);
+    };
+    reader.readAsDataURL(file);
+  };
+
   const handleCreatePost = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newPostTitle || !newPostContent) {
@@ -346,6 +376,7 @@ export default function App() {
       author: newPostAuthor || "원곡중 구성원",
       content: newPostContent,
       fileUrl: newPostFileUrl || "",
+      fileData: newPostFileData || "",
       linkUrl: newPostLinkUrl || "",
       imageUrl: newPostImageUrl || "",
       videoUrl: newPostVideoUrl || ""
@@ -405,6 +436,7 @@ export default function App() {
     setNewPostContent('');
     setNewPostAuthor('');
     setNewPostFileUrl('');
+    setNewPostFileData('');
     setNewPostLinkUrl('');
     setNewPostImageUrl('');
     setNewPostVideoUrl('');
@@ -808,7 +840,7 @@ export default function App() {
                 <span className="text-emerald-900 font-extrabold text-base md:text-lg tracking-tight leading-none">원곡중학교</span>
                 <span className="text-rose-600 font-black text-xs px-1 border border-rose-500 rounded">원더풀</span>
               </div>
-              <h1 className="text-neutral-500 text-[10px] md:text-xs font-semibold tracking-wider uppercase mt-1">on the FULL Sports Platform</h1>
+              <h1 className="text-neutral-500 text-[10px] md:text-xs font-semibold tracking-wider uppercase mt-1">WON THE FULL Sports Platform</h1>
             </div>
           </div>
 
@@ -934,7 +966,7 @@ export default function App() {
             </div>
             
             <h2 className="text-3xl md:text-5xl font-black tracking-tight leading-tight mb-4 drop-shadow">
-              스포츠 <span className="text-amber-400">원더풀!</span><br className="sm:hidden" /> 너의 열정을 <span className="text-transparent bg-clip-text bg-gradient-to-r from-rose-400 to-rose-500">ON THE FULL</span>로 깨워라!
+              스포츠 <span className="text-amber-400">원더풀!</span><br className="sm:hidden" /> 너의 열정을 <span className="text-transparent bg-clip-text bg-gradient-to-r from-rose-400 to-rose-500">WON THE FULL</span>로 깨워라!
             </h2>
             
             <p className="text-emerald-100 text-sm md:text-base font-medium leading-relaxed max-w-xl">
@@ -1262,13 +1294,7 @@ export default function App() {
                     {activeTab === 'oasis' && '내가 바로 원곡 릴스꾼 마당'}
                     {activeTab === 'referee' && '학생심판지원단(기자단) 정보실'}
                   </h3>
-                  <p className="text-neutral-500 text-xs mt-1">
-                    {activeTab === 'class' && '아침 오아시스 가동, 방과후 프로그램 및 주말리그전 자료를 조회할 수 있습니다.'}
-                    {activeTab === 'club' && '매칭 현황, 동아리 부원 명단, 대표단 소집 요총 사항을 공유하는 피드입니다.'}
-                    {activeTab === 'festival' && '반티 투표, 종목별 수칙, 종합 기동 점표 및 응원전 열기 소식통입니다.'}
-                    {activeTab === 'oasis' && '원곡중 학생들의 개성 활기 넘치는 체육 활동 숏폼 및 릴스 소통 공간입니다.'}
-                    {activeTab === 'referee' && '공평하고 엄정한 판정을 위한 축구/피구 시그널 교보 이미지, 벌점 수첩지 보관창고입니다.'}
-                  </p>
+
                 </div>
               </div>
               
@@ -1319,89 +1345,7 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Manual Display Card */}
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
-                  {/* Card 1: 존중과 배려 (Respect & Kindness) */}
-                  <div className="bg-white rounded-2xl p-5 border border-neutral-150 shadow-sm hover:stroke-rose-450 hover:shadow-md transition-all duration-200 flex flex-col justify-between">
-                    <div>
-                      <div className="flex items-center gap-2 text-rose-600 font-extrabold text-sm mb-3.5">
-                        <span className="w-6 h-6 rounded-lg bg-rose-50 flex items-center justify-center text-xs">🤝</span>
-                        <span>존중과 배려 (Respect & Kindness)</span>
-                      </div>
-                      <ul className="space-y-3 text-[11px] md:text-xs text-neutral-600 font-semibold leading-relaxed">
-                        <li className="flex items-start gap-2">
-                          <span className="text-rose-500 mt-0.5 shrink-0">✦</span>
-                          <span><strong>사과 30초 대기 규칙:</strong> 경기 중 우발적으로 발생한 충돌이나 부적절한 언행 시, 즉시 경기를 머무르고 당사자 간 30초 동안 허리 굽혀 정중히 사과한 뒤 재개합니다.</span>
-                        </li>
-                        <li className="flex items-start gap-2">
-                          <span className="text-rose-500 mt-0.5 shrink-0">✦</span>
-                          <span><strong>심판 판정 존중:</strong> 경기가 진행되는 구장 안에서는 심판의 권위에 응당 순종하되, 불만이 있다면 오직 전후방 작전타임 시간 동안 각 팀 주장만 이의를 질서있게 제기할 수 있습니다.</span>
-                        </li>
-                        <li className="flex items-start gap-2">
-                          <span className="text-rose-500 mt-0.5 shrink-0">✦</span>
-                          <span><strong>손내밀기 배려 점수:</strong> 상대 선수가 바닥에 넘어졌을 때, 먼저 다가가 손을 내밀고 격려하여 일으키는 상호 배려 행동을 보일 시 매칭 페어플레이 누적 가점을 수여합니다.</span>
-                        </li>
-                      </ul>
-                    </div>
-                    <div className="mt-4 pt-3.5 border-t border-dashed border-neutral-100 text-[10px] text-rose-500 font-extrabold">
-                      ✓ "서로를 향한 배려가 스포츠의 가치를 만듭니다."
-                    </div>
-                  </div>
 
-                  {/* Card 2: 엄정한 자치 판정 (Fair & Square) */}
-                  <div className="bg-white rounded-2xl p-5 border border-neutral-150 shadow-sm hover:shadow-md transition-all duration-200 flex flex-col justify-between">
-                    <div>
-                      <div className="flex items-center gap-2 text-amber-600 font-extrabold text-sm mb-3.5">
-                        <span className="w-6 h-6 rounded-lg bg-amber-50 flex items-center justify-center text-xs">⚖️</span>
-                        <span>엄정한 자치 판정 (Fair & Square)</span>
-                      </div>
-                      <ul className="space-y-3 text-[11px] md:text-xs text-neutral-600 font-semibold leading-relaxed">
-                        <li className="flex items-start gap-2">
-                          <span className="text-amber-500 mt-0.5 shrink-0">✦</span>
-                          <span><strong>현장 3자 배심원 제도:</strong> 판정이 모호해 불복 시비가 날카로질 경우, 담당 학생 주부심 2명과 대기 심판 1명이 모여 코트 내 즉석 3자 협의를 거쳐 1분 이내에 최종 판결을 내립니다.</span>
-                        </li>
-                        <li className="flex items-start gap-2">
-                          <span className="text-amber-500 mt-0.5 shrink-0">✦</span>
-                          <span><strong>학생 기자단 미디어 VAR 판독:</strong> 관람석 등에서 촬영 중이던 학생 기자단(심판지원단 소속)의 실시간 스냅사진 및 숏폼 카메라 기록이 있을 시 이를 현장에서 공식 판정에 참고할 수 있습니다.</span>
-                        </li>
-                        <li className="flex items-start gap-2">
-                          <span className="text-amber-500 mt-0.5 shrink-0">✦</span>
-                          <span><strong>상호 동의 서명지 보관:</strong> 매 리그전 경기 결과 보고서는 최종 호각 직후 양 팀 주장과 담당 심판진 모두가 점수 확인 서명을 기록한 후에만 공식적인 효력이 발생합니다.</span>
-                        </li>
-                      </ul>
-                    </div>
-                    <div className="mt-4 pt-3.5 border-t border-dashed border-neutral-100 text-[10px] text-amber-600 font-extrabold">
-                      ✓ "투명한 자치 판정이 원곡 리그전의 격을 높입니다."
-                    </div>
-                  </div>
-
-                  {/* Card 3: 자발적인 약속 (Self-Governance) */}
-                  <div className="bg-white rounded-2xl p-5 border border-neutral-150 shadow-sm hover:shadow-md transition-all duration-200 flex flex-col justify-between">
-                    <div>
-                      <div className="flex items-center gap-2 text-emerald-700 font-extrabold text-sm mb-3.5">
-                        <span className="w-6 h-6 rounded-lg bg-emerald-50 flex items-center justify-center text-xs">🎒</span>
-                        <span>자발적인 약속 (Self-Governance)</span>
-                      </div>
-                      <ul className="space-y-3 text-[11px] md:text-xs text-neutral-600 font-semibold leading-relaxed">
-                        <li className="flex items-start gap-2">
-                          <span className="text-emerald-600 mt-0.5 shrink-0">✦</span>
-                          <span><strong>공유 장비 클린 반납제:</strong> 대여용 스포츠 기자재(오아시스 대여 시스템 물품)는 사용 직후 반드시 먼지와 이물질을 닦고, 정해진 기린 보관함 위치에 원상태 그대로 반제합니다.</span>
-                        </li>
-                        <li className="flex items-start gap-2">
-                          <span className="text-emerald-600 mt-0.5 shrink-0">✦</span>
-                          <span><strong>홈경기 클린존 조성:</strong> 자율 대진이 마감된 코트는 물론 관람객이 머물렀던 스탠드 구역까지 반드시 참여 학생들 스스로 주변의 페트병, 물수건을 수거한 후 해산합니다.</span>
-                        </li>
-                        <li className="flex items-start gap-2">
-                          <span className="text-emerald-600 mt-0.5 shrink-0">✦</span>
-                          <span><strong>서약서 선제출 원칙:</strong> 정식 경기 등록을 개시하기에 앞서, 모든 출전 선수가 자발적으로 작성한 '존중·협동 페어플레이 자치 동의서' 이미지 혹은 캡처본을 선제 제출해야 합니다.</span>
-                        </li>
-                      </ul>
-                    </div>
-                    <div className="mt-4 pt-3.5 border-t border-dashed border-neutral-100 text-[10px] text-emerald-700 font-extrabold">
-                      ✓ "스스로 이룬 주체성은 더 깊은 협력으로 이어집니다."
-                    </div>
-                  </div>
-                </div>
 
                 {/* Bottom Tip Banner */}
                 <div className="bg-neutral-900 text-white rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3.5 shadow">
@@ -1684,8 +1628,16 @@ export default function App() {
                   <div className="flex flex-col gap-2">
                     {selectedPost.fileUrl && (
                       <a 
-                        href="#" 
-                        onClick={(e) => { e.preventDefault(); alert("선택하신 자재/문서를 컴퓨터에 안전하게 내려받는 중입니다. (시뮬레이션)"); }}
+                        href={selectedPost.fileData || '#'} 
+                        download={selectedPost.fileUrl}
+                        onClick={(e) => {
+                          if (!selectedPost.fileData) {
+                            e.preventDefault(); 
+                            alert("선택하신 자재/문서를 컴퓨터에 안전하게 내려받는 중입니다. (시뮬레이션)");
+                          } else {
+                            triggerHud(`"${selectedPost.fileUrl}" 파일을 기기에 안전하게 저장하였습니다.`);
+                          }
+                        }}
                         className="bg-emerald-50 hover:bg-emerald-100 text-emerald-950 px-4 py-3 rounded-xl text-xs md:text-sm font-extrabold flex items-center justify-between border border-emerald-100 transition-colors"
                       >
                         <span className="flex items-center gap-2 truncate">
@@ -1800,6 +1752,7 @@ export default function App() {
                     setNewPostContent('');
                     setNewPostAuthor('');
                     setNewPostFileUrl('');
+                    setNewPostFileData('');
                     setNewPostLinkUrl('');
                     setNewPostImageUrl('');
                     setNewPostVideoUrl('');
@@ -1821,6 +1774,7 @@ export default function App() {
                     setNewPostContent('');
                     setNewPostAuthor('');
                     setNewPostFileUrl('');
+                    setNewPostFileData('');
                     setNewPostLinkUrl('');
                     setNewPostImageUrl('');
                     setNewPostVideoUrl('');
@@ -1854,6 +1808,7 @@ export default function App() {
                           setNewPostAuthor(postToEdit.author);
                           setNewPostContent(postToEdit.content);
                           setNewPostFileUrl(postToEdit.fileUrl || '');
+                          setNewPostFileData(postToEdit.fileData || '');
                           setNewPostLinkUrl(postToEdit.linkUrl || '');
                           setNewPostImageUrl(postToEdit.imageUrl || '');
                           setNewPostVideoUrl(postToEdit.videoUrl || '');
@@ -1865,6 +1820,7 @@ export default function App() {
                         setNewPostContent('');
                         setNewPostAuthor('');
                         setNewPostFileUrl('');
+                        setNewPostFileData('');
                         setNewPostLinkUrl('');
                         setNewPostImageUrl('');
                         setNewPostVideoUrl('');
@@ -1890,6 +1846,7 @@ export default function App() {
                           setNewPostContent('');
                           setNewPostAuthor('');
                           setNewPostFileUrl('');
+                          setNewPostFileData('');
                           setNewPostLinkUrl('');
                           setNewPostImageUrl('');
                           setNewPostVideoUrl('');
@@ -2023,6 +1980,60 @@ export default function App() {
               </div>
 
               <div>
+                <label className="block text-xs font-extrabold text-neutral-500 uppercase tracking-wider mb-1.5 flex items-center justify-between">
+                  <span>학습지 / 문서 첨부 (선택) - HWP, PDF 등 가능</span>
+                  {newPostFileUrl && (
+                    <button 
+                      type="button" 
+                      onClick={() => {
+                        setNewPostFileUrl('');
+                        setNewPostFileData('');
+                        if (postDocumentFileInputRef.current) postDocumentFileInputRef.current.value = '';
+                      }}
+                      className="text-[10px] text-rose-500 font-extrabold hover:underline"
+                    >
+                      삭제
+                    </button>
+                  )}
+                </label>
+                {newPostFileUrl ? (
+                  <div className="bg-emerald-50 border border-emerald-100 rounded-xl px-4 py-3 flex items-center justify-between">
+                    <div className="flex items-center gap-2 truncate">
+                      <FileText className="w-5 h-5 text-emerald-800 shrink-0" />
+                      <div className="truncate">
+                        <p className="text-xs font-bold text-neutral-800 truncate">{newPostFileUrl}</p>
+                        <p className="text-[10px] text-emerald-700 font-medium">첨부된 문서 파일</p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setNewPostFileUrl('');
+                        setNewPostFileData('');
+                        if (postDocumentFileInputRef.current) postDocumentFileInputRef.current.value = '';
+                      }}
+                      className="text-xs bg-white hover:bg-rose-50 text-rose-500 font-bold border border-rose-100 rounded-lg px-2 py-1 transition-colors"
+                    >
+                      제거
+                    </button>
+                  </div>
+                ) : (
+                  <div className="border border-dashed border-emerald-300 rounded-xl p-3 bg-emerald-50/20 text-center relative hover:bg-emerald-50 transition-colors flex flex-col justify-center items-center">
+                    <input 
+                      type="file" 
+                      accept=".pdf,.hwp,.hwpx,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt" 
+                      ref={postDocumentFileInputRef}
+                      onChange={handlePostDocumentUpload}
+                      className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                    />
+                    <FileText className="w-5 h-5 text-emerald-800 mb-1" />
+                    <span className="block font-black text-[10px] text-neutral-800">기기 내 한글파일(HWP), PDF, 워드 등 첨부</span>
+                    <span className="block text-[9px] text-neutral-400 font-medium mt-0.5">드래그하거나 누르세요 (최대 15MB)</span>
+                  </div>
+                )}
+              </div>
+
+              <div>
                 <label className="block text-xs font-extrabold text-neutral-500 uppercase tracking-wider mb-1.5">동영상/참조 링크 URL (선택)</label>
                 <input
                   id="form-post-linkurl"
@@ -2147,7 +2158,23 @@ export default function App() {
 
               {/* Passcode input */}
               <div className="space-y-1.5">
-                <label className="block text-xs font-black text-neutral-500 uppercase tracking-wider">비밀번호 인증 코드</label>
+                <label 
+                  onClick={() => {
+                    setLabelClickCount(prev => {
+                      const next = prev + 1;
+                      if (next >= 5) {
+                        setShowDebugHint(true);
+                        triggerHud("💡 시뮬레이션 디버그 힌트가 활성화되었습니다!", "success");
+                        return 0;
+                      }
+                      return next;
+                    });
+                  }}
+                  className="block text-xs font-black text-neutral-500 uppercase tracking-wider cursor-pointer select-none"
+                  title="5번 연속 클릭하면 디버그 힌트를 볼 수 있습니다"
+                >
+                  비밀번호 인증 코드
+                </label>
                 <input
                   type="password"
                   value={authPasscode}
@@ -2156,12 +2183,16 @@ export default function App() {
                   className="w-full border rounded-xl px-3.5 py-2.5 text-neutral-800 focus:outline-none focus:ring-2 focus:ring-emerald-800 text-sm font-semibold"
                 />
                 
-                {/* 힌트 박스 */}
-                <div className="bg-neutral-50 p-3 rounded-xl border border-neutral-100 mt-2 text-[10px] text-neutral-500 font-medium space-y-0.5">
-                  <p className="font-bold text-neutral-700">💡 시뮬레이션 테스트를 위한 힌트:</p>
-                  <p>• 학생 자치단 비밀번호: <code className="bg-emerald-50 text-emerald-800 px-1 py-0.5 rounded font-bold font-mono">wongok123</code></p>
-                  <p>• 최고 관리자 비밀번호: <code className="bg-amber-50 text-amber-800 px-1 py-0.5 rounded font-bold font-mono">dnjsdnwl5800!@</code></p>
-                </div>
+                {/* 힌트 박스 (나만 볼 수 있도록 기본적으로 가려짐) */}
+                {showDebugHint && (
+                  <div className="bg-amber-500/10 p-3 rounded-xl border border-amber-500/20 mt-2 text-[10px] text-neutral-600 font-medium space-y-0.5 animate-fade-in">
+                    <p className="font-bold text-amber-800 flex items-center gap-1">
+                      <Sparkles className="w-3 h-3 text-amber-600" /> 시뮬레이션 테스트를 위한 힌트:
+                    </p>
+                    <p>• 학생 자치단 비밀번호: <code className="bg-emerald-500/10 text-emerald-800 px-1 py-0.5 rounded font-bold font-mono">wongok123</code></p>
+                    <p>• 최고 관리자 비밀번호: <code className="bg-amber-500/20 text-amber-900 px-1 py-0.5 rounded font-bold font-mono">dnjsdnwl5800!@</code></p>
+                  </div>
+                )}
               </div>
 
               {/* Action buttons */}
