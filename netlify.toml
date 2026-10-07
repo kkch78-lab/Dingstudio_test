@@ -1,0 +1,25 @@
+# Build settings for a Google AI Studio app (Vite + React).
+# Vite writes its production build to `dist`, which keeps the publish
+# directory separate from the repository root.
+[build]
+  # Until the app code (package.json) is pushed, publish a placeholder page
+  # so deploys succeed. Once package.json exists, the real Vite build runs.
+  command = """
+    if [ -f package.json ]; then
+      npm run build
+    else
+      mkdir -p dist && printf '<!doctype html><html><head><meta charset="utf-8"><title>Coming soon</title></head><body><h1>Coming soon</h1><p>The app has not been deployed yet.</p></body></html>' > dist/index.html
+    fi
+  """
+  publish = "dist"
+
+[build.environment]
+  # The Next.js Runtime plugin is installed from the Netlify UI, but this is
+  # not a Next.js app. This tells the plugin to skip itself.
+  NETLIFY_NEXT_PLUGIN_SKIP = "true"
+
+# Serve index.html for client-side routes in the single-page app.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
