@@ -1,0 +1,6 @@
+{
+  "name": "원곡중학교 스포츠 원더풀",
+  "description": "원곡중학교 학생 주도형 스포츠 자치 네트워크 및 체육 소통 플랫폼 (WON-the FULL)",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
