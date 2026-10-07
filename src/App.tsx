@@ -39,6 +39,8 @@ import { storeVideoMedia, loadVideoMedia, deleteVideoMedia } from './utils/media
 import { optimizeImageFile } from './utils/imageOptimizer';
 import { Post, RentalItem, MatchItem, UserRole, ToastInfo } from './types';
 import { INITIAL_POSTS, INITIAL_RENTALS, INITIAL_MATCHES, INITIAL_ANNOUNCEMENTS } from './data/initialData';
+import { collection, doc, onSnapshot, setDoc, deleteDoc, updateDoc } from 'firebase/firestore';
+import { db, handleFirestoreError, OperationType } from './firebase';
 
 export function App() {
   // Navigation & Role State
@@ -86,34 +88,43 @@ export function App() {
     }
   });
 
-  // Real-time server sync for multi-user viewing across all devices
+  // 🚀 Real-time Cloud Sync with Firebase Firestore across ALL devices (PC, Mobile, etc.)
   useEffect(() => {
-    let isMounted = true;
-    const fetchSharedPosts = async () => {
-      try {
-        const res = await fetch('/api/posts');
-        if (res.ok) {
-          const data = await res.json();
-          if (data && data.success && Array.isArray(data.posts) && data.posts.length > 0) {
-            if (isMounted) {
-              setPosts((prevPosts) => {
-                const serverPostIds = new Set(data.posts.map((p: Post) => p.id));
-                const localOnly = prevPosts.filter((p) => !serverPostIds.has(p.id) && p.id.startsWith('post_'));
-                return [...data.posts, ...localOnly];
-              });
-            }
-          }
-        }
-      } catch {
-        // Fallback safely when running purely static or offline
-      }
-    };
+    let unsubscribe: (() => void) | undefined;
+    try {
+      const postsCol = collection(db, 'posts');
 
-    fetchSharedPosts();
-    const interval = setInterval(fetchSharedPosts, 5000);
+      unsubscribe = onSnapshot(
+        postsCol,
+        (snapshot) => {
+          if (!snapshot.empty) {
+            const remotePosts: Post[] = [];
+            snapshot.forEach((docSnap) => {
+              const data = docSnap.data() as Post;
+              remotePosts.push({ ...data, id: docSnap.id });
+            });
+            // Sort by date / id descending
+            remotePosts.sort((a, b) => (b.date || '').localeCompare(a.date || '') || b.id.localeCompare(a.id));
+            setPosts(remotePosts);
+          } else {
+            // Seed INITIAL_POSTS into Firestore so cloud database starts populated for everyone
+            INITIAL_POSTS.forEach((initPost) => {
+              setDoc(doc(db, 'posts', initPost.id), initPost).catch((err) => {
+                handleFirestoreError(err, OperationType.CREATE, `posts/${initPost.id}`);
+              });
+            });
+          }
+        },
+        (error) => {
+          handleFirestoreError(error, OperationType.GET, 'posts');
+        }
+      );
+    } catch (err) {
+      handleFirestoreError(err, OperationType.GET, 'posts');
+    }
+
     return () => {
-      isMounted = false;
-      clearInterval(interval);
+      if (unsubscribe) unsubscribe();
     };
   }, []);
   const [rentals, setRentals] = useState<RentalItem[]>(() => {
@@ -511,6 +522,14 @@ export function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       }).catch(() => {});
+      // 🚀 Save to Firebase Firestore (Instant PC ↔ Mobile sync)
+      const firestoreDoc: Record<string, any> = {};
+      Object.entries(payload).forEach(([k, v]) => {
+        if (v !== undefined) firestoreDoc[k] = v;
+      });
+      setDoc(doc(db, 'posts', editingPostId), firestoreDoc).catch((err) => {
+        handleFirestoreError(err, OperationType.UPDATE, `posts/${editingPostId}`);
+      });
     } else {
       setPosts((prevPosts) => [payload, ...prevPosts]);
       showToast('🎉 소식/자료가 즉시 등록되어 게시되었습니다!', 'success');
@@ -520,6 +539,14 @@ export function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       }).catch(() => {});
+      // 🚀 Save to Firebase Firestore (Instant PC ↔ Mobile sync)
+      const firestoreDoc: Record<string, any> = {};
+      Object.entries(payload).forEach(([k, v]) => {
+        if (v !== undefined) firestoreDoc[k] = v;
+      });
+      setDoc(doc(db, 'posts', newPostId), firestoreDoc).catch((err) => {
+        handleFirestoreError(err, OperationType.CREATE, `posts/${newPostId}`);
+      });
     }
 
     // 2. Close modal immediately for a seamless user experience
@@ -554,6 +581,9 @@ export function App() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(updatePayload)
     }).catch(() => {});
+    updateDoc(doc(db, 'posts', id), updatePayload).catch((err) => {
+      handleFirestoreError(err, OperationType.UPDATE, `posts/${id}`);
+    });
   };
 
   // Delete Post (Managers Only)
@@ -573,6 +603,9 @@ export function App() {
     showToast('자료가 성공적으로 삭제되었습니다.');
     if (activeReaderPost?.id === id) setActiveReaderPost(null);
     fetch(`/api/posts/${id}`, { method: 'DELETE' }).catch(() => {});
+    deleteDoc(doc(db, 'posts', id)).catch((err) => {
+      handleFirestoreError(err, OperationType.DELETE, `posts/${id}`);
+    });
   };
 
   // Open Reader & Increment Views
@@ -585,6 +618,7 @@ export function App() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ views: nextViews })
     }).catch(() => {});
+    updateDoc(doc(db, 'posts', post.id), { views: nextViews }).catch(() => {});
   };
 
   // Rent Equipment Submit

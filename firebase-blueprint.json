@@ -1,0 +1,34 @@
+{
+  "entities": {
+    "Post": {
+      "title": "Post",
+      "description": "A sports bulletin post with category, title, author, content, media and metadata",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "category": { "type": "string" },
+        "title": { "type": "string" },
+        "author": { "type": "string" },
+        "content": { "type": "string" },
+        "date": { "type": "string" },
+        "views": { "type": "number" },
+        "imageUrl": { "type": "string" },
+        "imageFileName": { "type": "string" },
+        "videoData": { "type": "string" },
+        "videoFileName": { "type": "string" },
+        "videoSourceType": { "type": "string" },
+        "fileUrl": { "type": "string" },
+        "fileData": { "type": "string" },
+        "isFlagged": { "type": "boolean" },
+        "flaggedReason": { "type": "string" }
+      },
+      "required": ["id", "category", "title", "content"]
+    }
+  },
+  "firestore": {
+    "/posts/{postId}": {
+      "schema": "Post",
+      "description": "Collection of all sports posts, photos, and videos viewable by all users"
+    }
+  }
+}
