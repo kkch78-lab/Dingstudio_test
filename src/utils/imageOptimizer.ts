@@ -17,8 +17,8 @@ export interface OptimizedImageResult {
  */
 export async function optimizeImageFile(
   file: File,
-  maxDimension = 1920,
-  quality = 0.85
+  maxDimension = 1280,
+  quality = 0.75
 ): Promise<OptimizedImageResult> {
   return new Promise((resolve, reject) => {
     // 1. Basic validation
@@ -27,8 +27,8 @@ export async function optimizeImageFile(
       return;
     }
 
-    // For Animated GIFs, preserve original to retain animation
-    if (file.type === 'image/gif') {
+    // For Animated GIFs under 500KB, preserve original
+    if (file.type === 'image/gif' && file.size < 500 * 1024) {
       const reader = new FileReader();
       reader.onload = () => {
         if (typeof reader.result === 'string') {
@@ -58,7 +58,6 @@ export async function optimizeImageFile(
         let height = img.naturalHeight || img.height;
 
         if (!width || !height) {
-          // Fallback if dimensions not detected
           URL.revokeObjectURL(objectUrl);
           fallbackReadFile(file).then(resolve).catch(reject);
           return;
@@ -86,11 +85,8 @@ export async function optimizeImageFile(
           return;
         }
 
-        // High quality rendering
         ctx.imageSmoothingEnabled = true;
         ctx.imageSmoothingQuality = 'high';
-
-        // Draw white background in case of transparent png converting to jpeg
         ctx.fillStyle = '#FFFFFF';
         ctx.fillRect(0, 0, width, height);
         ctx.drawImage(img, 0, 0, width, height);
@@ -98,8 +94,25 @@ export async function optimizeImageFile(
         URL.revokeObjectURL(objectUrl);
 
         // Convert to optimized JPEG
-        const outputFormat = 'image/jpeg';
-        const dataUrl = canvas.toDataURL(outputFormat, quality);
+        let dataUrl = canvas.toDataURL('image/jpeg', quality);
+
+        // If dataUrl exceeds 450KB, downscale further to guarantee Firestore limits
+        if (dataUrl.length > 450000) {
+          const smallCanvas = document.createElement('canvas');
+          const scale = 960 / Math.max(width, height);
+          smallCanvas.width = Math.round(width * scale);
+          smallCanvas.height = Math.round(height * scale);
+          const sCtx = smallCanvas.getContext('2d');
+          if (sCtx) {
+            sCtx.imageSmoothingEnabled = true;
+            sCtx.imageSmoothingQuality = 'high';
+            sCtx.fillStyle = '#FFFFFF';
+            sCtx.fillRect(0, 0, smallCanvas.width, smallCanvas.height);
+            sCtx.drawImage(canvas, 0, 0, smallCanvas.width, smallCanvas.height);
+            dataUrl = smallCanvas.toDataURL('image/jpeg', 0.65);
+          }
+        }
+
         const estimatedSize = Math.round((dataUrl.length * 3) / 4);
 
         resolve({

@@ -197,37 +197,24 @@ export function App() {
   // Safe LocalStorage Sync Helper
   const safeSetLocalStorage = (key: string, data: any) => {
     try {
-      if (key === 'wongok_posts' && Array.isArray(data)) {
-        // Strip out heavy base64 strings from localStorage to strictly avoid QuotaExceededError.
-        // Full videos and high-res images are persistently saved in IndexedDB and loaded automatically into memory.
-        const sanitized = data.map((item) => {
-          let copy = { ...item };
-          if (copy.videoData && copy.videoData.length > 20000) {
-            copy.hasStoredVideo = true;
-            copy.videoData = '';
-          }
-          if (copy.imageUrl && copy.imageUrl.length > 30000) {
-            copy.hasStoredImage = true;
-            copy.imageUrl = '';
-          }
-          return copy;
-        });
-        localStorage.setItem(key, JSON.stringify(sanitized));
-        return;
-      }
       localStorage.setItem(key, JSON.stringify(data));
     } catch {
       try {
-        if (Array.isArray(data)) {
-          const trimmed = data.map((item) => {
-            return {
-              ...item,
-              videoData: '',
-              imageUrl: item.imageUrl && item.imageUrl.length > 30000 ? '' : item.imageUrl,
-              fileData: ''
-            };
+        if (key === 'wongok_posts' && Array.isArray(data)) {
+          // If browser localStorage quota is exceeded, strip only oversized media strings
+          const sanitized = data.map((item) => {
+            let copy = { ...item };
+            if (copy.videoData && copy.videoData.length > 300000) {
+              copy.hasStoredVideo = true;
+              copy.videoData = '';
+            }
+            if (copy.imageUrl && copy.imageUrl.length > 500000) {
+              copy.hasStoredImage = true;
+              copy.imageUrl = '';
+            }
+            return copy;
           });
-          localStorage.setItem(key, JSON.stringify(trimmed));
+          localStorage.setItem(key, JSON.stringify(sanitized));
         }
       } catch {
         // Ignore storage errors safely
@@ -525,7 +512,13 @@ export function App() {
       // 🚀 Save to Firebase Firestore (Instant PC ↔ Mobile sync)
       const firestoreDoc: Record<string, any> = {};
       Object.entries(payload).forEach(([k, v]) => {
-        if (v !== undefined) firestoreDoc[k] = v;
+        if (v !== undefined) {
+          if (k === 'videoData' && typeof v === 'string' && v.length > 750000) {
+            firestoreDoc[k] = '';
+          } else {
+            firestoreDoc[k] = v;
+          }
+        }
       });
       setDoc(doc(db, 'posts', editingPostId), firestoreDoc).catch((err) => {
         handleFirestoreError(err, OperationType.UPDATE, `posts/${editingPostId}`);
@@ -542,7 +535,13 @@ export function App() {
       // 🚀 Save to Firebase Firestore (Instant PC ↔ Mobile sync)
       const firestoreDoc: Record<string, any> = {};
       Object.entries(payload).forEach(([k, v]) => {
-        if (v !== undefined) firestoreDoc[k] = v;
+        if (v !== undefined) {
+          if (k === 'videoData' && typeof v === 'string' && v.length > 750000) {
+            firestoreDoc[k] = '';
+          } else {
+            firestoreDoc[k] = v;
+          }
+        }
       });
       setDoc(doc(db, 'posts', newPostId), firestoreDoc).catch((err) => {
         handleFirestoreError(err, OperationType.CREATE, `posts/${newPostId}`);
@@ -718,12 +717,8 @@ export function App() {
     setIsImageLoading(true);
     setFormImageFileName(file.name);
 
-    // Instant Object URL for immediate preview without lag
-    const tempUrl = URL.createObjectURL(file);
-    setFormImageUrl(tempUrl);
-
     try {
-      const optimized = await optimizeImageFile(file, 1920, 0.85);
+      const optimized = await optimizeImageFile(file, 1280, 0.75);
       setFormImageUrl(optimized.dataUrl);
       setFormImageFileName(optimized.fileName);
       setFormImageFileSize(optimized.optimizedSize);
@@ -775,10 +770,6 @@ export function App() {
       setFormVideoFileName(file.name);
       setFormVideoFileSize(file.size);
 
-      // Instant Blob Object URL for immediate zero-lag preview
-      const objectUrl = URL.createObjectURL(file);
-      setFormVideoData(objectUrl);
-
       const reader = new FileReader();
       reader.onload = () => {
         if (typeof reader.result === 'string') {
@@ -790,7 +781,7 @@ export function App() {
       };
       reader.onerror = () => {
         setIsVideoLoading(false);
-        showToast('동영상 처리 중 알림: 임시 미리보기 모드로 전환되었습니다.', 'info');
+        showToast('동영상 처리 중 오류가 발생했습니다.', 'error');
       };
       reader.readAsDataURL(file);
     }
@@ -1337,17 +1328,12 @@ export function App() {
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
                 {filteredPosts.map((post) => {
-                  const isBlind = post.isFlagged && userRole === 'student';
                   return (
                     <div
                       key={post.id}
                       id={`post-card-${post.id}`}
-                      onClick={() => !isBlind && handleOpenReader(post)}
-                      className={`bg-white border rounded-2xl p-5 shadow-sm transition-all flex flex-col justify-between ${
-                        isBlind
-                          ? 'border-amber-200 bg-amber-50/20'
-                          : 'border-slate-200 hover:border-emerald-500/40 hover:shadow-md cursor-pointer'
-                      }`}
+                      onClick={() => handleOpenReader(post)}
+                      className="bg-white border border-slate-200 hover:border-emerald-500/40 hover:shadow-md cursor-pointer rounded-2xl p-5 shadow-sm transition-all flex flex-col justify-between"
                     >
                       <div>
                         {/* Top Category & Author */}
@@ -1361,36 +1347,33 @@ export function App() {
                           </span>
                         </div>
 
-                        {/* Title & Preview / Blind notice */}
-                        {isBlind ? (
-                          <div className="flex-1 flex flex-col items-center justify-center text-center py-6 px-4 bg-amber-50/60 rounded-xl border border-dashed border-amber-300 min-h-[120px] my-2">
-                            <CircleAlert className="w-7 h-7 text-amber-600 mb-1.5" />
-                            <p className="text-xs font-black text-amber-950">부적절성 우려로 블라인드 처리됨</p>
-                            <p className="text-[10px] text-slate-400 mt-1 max-w-[200px] leading-relaxed">
-                              원곡중 자치 규정에 의해 학생 자치단에서 임시로 노출을 제한하였습니다.
-                            </p>
+                        {post.isFlagged && (
+                          <div className="mb-2 px-2.5 py-1 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-[10px] font-bold flex items-center gap-1">
+                            <CircleAlert className="w-3 h-3 text-amber-600 shrink-0" />
+                            <span>학생자치회 검토 게시물 (전체 공개)</span>
                           </div>
-                        ) : (
-                          <div className={post.isFlagged ? 'opacity-70' : ''}>
-                            {/* Media Preview: Image or Video */}
-                            {post.imageUrl ? (
-                              <div className="mb-3 rounded-xl overflow-hidden max-h-40 bg-slate-100 border border-slate-200 relative group">
-                                <img
-                                  src={post.imageUrl}
-                                  alt={post.title}
-                                  className="w-full h-36 object-cover hover:scale-105 transition-transform duration-300"
-                                  onError={(e) => {
-                                    (e.target as HTMLImageElement).style.display = 'none';
-                                  }}
-                                />
-                                {post.imageFileName && (
-                                  <span className="absolute bottom-2 left-2 px-2 py-0.5 rounded-md bg-black/75 text-[10px] font-bold text-emerald-300 flex items-center gap-1 backdrop-blur-sm">
-                                    <ImageIcon className="w-3 h-3" />
-                                    <span>사진</span>
-                                  </span>
-                                )}
-                              </div>
-                            ) : (post.videoData || post.videoUrl || post.videoFileName) ? (
+                        )}
+
+                        <div>
+                          {/* Media Preview: Image or Video */}
+                          {post.imageUrl ? (
+                            <div className="mb-3 rounded-xl overflow-hidden max-h-40 bg-slate-100 border border-slate-200 relative group">
+                              <img
+                                src={post.imageUrl}
+                                alt={post.title}
+                                className="w-full h-36 object-cover hover:scale-105 transition-transform duration-300"
+                                onError={(e) => {
+                                  (e.target as HTMLImageElement).style.display = 'none';
+                                }}
+                              />
+                              {post.imageFileName && (
+                                <span className="absolute bottom-2 left-2 px-2 py-0.5 rounded-md bg-black/75 text-[10px] font-bold text-emerald-300 flex items-center gap-1 backdrop-blur-sm">
+                                  <ImageIcon className="w-3 h-3" />
+                                  <span>사진</span>
+                                </span>
+                              )}
+                            </div>
+                          ) : (post.videoData || post.videoUrl || post.videoFileName) ? (
                               <div className="mb-3 rounded-xl overflow-hidden bg-slate-950 border border-slate-800 relative group">
                                 {(() => {
                                   const media = parseVideoMedia(post.videoUrl, post.videoData);
@@ -1454,8 +1437,7 @@ export function App() {
                               {post.content}
                             </p>
                           </div>
-                        )}
-                      </div>
+                        </div>
 
                       {/* Footer Actions */}
                       <div className="pt-3.5 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-400 font-bold">
@@ -1470,13 +1452,13 @@ export function App() {
                             {post.views}
                           </span>
 
-                          {(post.fileUrl || post.fileData) && !isBlind && (
+                          {(post.fileUrl || post.fileData) && (
                             <span className="p-1 rounded bg-emerald-50 text-emerald-800" title="첨부파일 있음">
                               <FileDown className="w-3.5 h-3.5" />
                             </span>
                           )}
 
-                          {(post.videoUrl || post.videoData) && !isBlind && (
+                          {(post.videoUrl || post.videoData) && (
                             <span className="p-1 rounded bg-rose-50 text-rose-700 flex items-center gap-0.5" title={post.videoData ? '직접 첨부 영상' : '영상 링크'}>
                               <Play className="w-3.5 h-3.5 fill-rose-700" />
                             </span>
