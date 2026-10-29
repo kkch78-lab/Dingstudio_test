@@ -40,7 +40,7 @@ async function startServer() {
   app.use(express.json({ limit: '100mb' }));
   app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
-  // Static route for uploaded videos
+  // Static and Streaming routes for uploaded videos
   const videosDir = path.join(__dirname, 'public', 'videos');
   if (!fs.existsSync(videosDir)) {
     try {
@@ -49,6 +49,71 @@ async function startServer() {
       console.warn('Could not create videos directory:', e);
     }
   }
+
+  // Resilient Video Streaming Route with Range Request (HTTP 206) support for iOS Safari, Android Chrome & KakaoTalk
+  app.get('/videos/:filename', (req, res, next) => {
+    try {
+      const filename = path.basename(req.params.filename);
+      let filePath = path.join(videosDir, filename);
+
+      if (!fs.existsSync(filePath)) {
+        // Check dist/videos if in production
+        const distFilePath = path.join(__dirname, 'dist', 'videos', filename);
+        if (fs.existsSync(distFilePath)) {
+          filePath = distFilePath;
+        } else {
+          return next();
+        }
+      }
+
+      const stat = fs.statSync(filePath);
+      const fileSize = stat.size;
+      const range = req.headers.range;
+
+      // Determine optimal MIME type: serve MOV/M4V as video/mp4 for cross-browser hardware playback
+      const ext = path.extname(filename).toLowerCase();
+      let contentType = 'video/mp4';
+      if (ext === '.webm') contentType = 'video/webm';
+      else if (ext === '.ogg') contentType = 'video/ogg';
+      else if (ext === '.3gp') contentType = 'video/3gpp';
+      else if (ext === '.mov' || ext === '.m4v' || ext === '.mp4') contentType = 'video/mp4';
+
+      res.setHeader('Accept-Ranges', 'bytes');
+      res.setHeader('Access-Control-Allow-Origin', '*');
+
+      if (range) {
+        const parts = range.replace(/bytes=/, '').split('-');
+        const start = parseInt(parts[0], 10);
+        const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+
+        if (start >= fileSize) {
+          res.status(416).send(`Requested range not satisfiable: ${start} >= ${fileSize}`);
+          return;
+        }
+
+        const chunkSize = end - start + 1;
+        const fileStream = fs.createReadStream(filePath, { start, end });
+        res.writeHead(206, {
+          'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+          'Accept-Ranges': 'bytes',
+          'Content-Length': chunkSize,
+          'Content-Type': contentType,
+        });
+        fileStream.pipe(res);
+      } else {
+        res.writeHead(200, {
+          'Content-Length': fileSize,
+          'Content-Type': contentType,
+          'Accept-Ranges': 'bytes',
+        });
+        fs.createReadStream(filePath).pipe(res);
+      }
+    } catch (streamErr) {
+      console.error('Video streaming error:', streamErr);
+      next();
+    }
+  });
+
   app.use('/videos', express.static(videosDir));
 
   // Static route for uploaded photos/images
@@ -105,7 +170,7 @@ async function startServer() {
     }
   });
 
-  // Video Upload API: Saves uploaded video files to /public/videos for fast permanent streaming across all devices
+  // Video Upload API: Saves uploaded video files (KakaoTalk, Phone camera, etc.) to /public/videos for fast permanent streaming across all devices
   app.post('/api/upload-video', (req, res) => {
     try {
       const { fileName, fileData } = req.body;
@@ -120,9 +185,19 @@ async function startServer() {
         : fileData;
 
       const buffer = Buffer.from(base64Data, 'base64');
-      const ext = path.extname(fileName || 'video.mp4') || '.mp4';
-      const baseCleanName = path.basename(fileName || 'video', ext).replace(/[^a-zA-Z0-9_-]/g, '_');
-      const uniqueFileName = `wongok_${Date.now()}_${Math.random().toString(36).substring(2, 7)}_${baseCleanName}${ext}`;
+      
+      // Smart extension resolution (supports KakaoTalk files and smartphone camera files)
+      let rawExt = path.extname(fileName || '').toLowerCase();
+      if (!rawExt) {
+        if (fileData.includes('video/mp4')) rawExt = '.mp4';
+        else if (fileData.includes('video/quicktime')) rawExt = '.mov';
+        else if (fileData.includes('video/webm')) rawExt = '.webm';
+        else if (fileData.includes('video/3gpp')) rawExt = '.3gp';
+        else rawExt = '.mp4';
+      }
+
+      const baseCleanName = path.basename(fileName || 'video', rawExt).replace(/[^a-zA-Z0-9_-]/g, '_');
+      const uniqueFileName = `wongok_${Date.now()}_${Math.random().toString(36).substring(2, 7)}_${baseCleanName || 'clip'}${rawExt}`;
       const filePath = path.join(videosDir, uniqueFileName);
 
       fs.writeFileSync(filePath, buffer);

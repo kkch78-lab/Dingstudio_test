@@ -10,10 +10,19 @@ export interface VideoMediaInfo {
 
 /**
  * Parses any video URL, YouTube link, Google Drive link, or direct file/blob data
- * and returns clean embed or playback parameters.
+ * and returns clean embed or playback parameters for PC, Mobile, and KakaoTalk browsers.
  */
 export function parseVideoMedia(urlOrData?: string, videoData?: string): VideoMediaInfo {
-  let raw = (videoData || urlOrData || '').trim();
+  // If urlOrData is a server path (/videos/...) or full HTTP URL, prefer it over heavy base64 videoData
+  let raw = '';
+  if (urlOrData && (urlOrData.startsWith('/videos/') || urlOrData.startsWith('./videos/') || urlOrData.startsWith('http://') || urlOrData.startsWith('https://'))) {
+    raw = urlOrData.trim();
+  } else if (videoData && videoData.trim()) {
+    raw = videoData.trim();
+  } else if (urlOrData && urlOrData.trim()) {
+    raw = urlOrData.trim();
+  }
+
   if (!raw) {
     return { type: 'none', src: '' };
   }
@@ -28,7 +37,38 @@ export function parseVideoMedia(urlOrData?: string, videoData?: string): VideoMe
       type: 'html5',
       src: raw,
       isDirectFile: true,
-      platformLabel: '직접 첨부된 동영상 (MP4/WebM/MOV)'
+      platformLabel: '스마트폰/기기 직접 첨부 영상'
+    };
+  }
+
+  // 2. Local uploaded video paths on server (/videos/... or ./videos/...)
+  if (raw.startsWith('/videos/') || raw.startsWith('./videos/')) {
+    const cleanSrc = raw.startsWith('./') ? raw.replace(/^\./, '') : raw;
+    return {
+      type: 'html5',
+      src: cleanSrc,
+      isDirectFile: true,
+      platformLabel: '원곡 스포츠 영상 (스트리밍)'
+    };
+  }
+
+  // 3. Raw filename like "wongok_reels_jump_shot.mp4" or "KakaoTalk_...mp4" without slash
+  if (/\.(mp4|mov|webm|m4v|3gp|mkv|avi)$/i.test(raw) && !raw.includes('/') && !raw.includes('http')) {
+    return {
+      type: 'html5',
+      src: `/videos/${raw}`,
+      isDirectFile: true,
+      platformLabel: '원곡 스포츠 영상'
+    };
+  }
+
+  // 4. Other root-relative paths like /wongok_video.mp4
+  if (raw.startsWith('/') && /\.(mp4|mov|webm|m4v|3gp|mkv|avi|ogg)(\?.*)?$/i.test(raw)) {
+    return {
+      type: 'html5',
+      src: raw,
+      isDirectFile: true,
+      platformLabel: '원곡 스포츠 영상'
     };
   }
 
@@ -37,7 +77,8 @@ export function parseVideoMedia(urlOrData?: string, videoData?: string): VideoMe
     !raw.startsWith('http://') &&
     !raw.startsWith('https://') &&
     !raw.startsWith('data:') &&
-    !raw.startsWith('blob:')
+    !raw.startsWith('blob:') &&
+    !raw.startsWith('/')
   ) {
     if (
       raw.includes('youtube.com') ||
@@ -50,8 +91,6 @@ export function parseVideoMedia(urlOrData?: string, videoData?: string): VideoMe
     ) {
       raw = `https://${raw}`;
     } else {
-      // It's just a raw filename like "my_video.mp4" without data or full URL
-      // Cannot be fetched directly as HTML5 stream without data source
       return {
         type: 'none',
         src: '',
@@ -60,7 +99,7 @@ export function parseVideoMedia(urlOrData?: string, videoData?: string): VideoMe
     }
   }
 
-  // 2. YouTube (watch, youtu.be, shorts, live, embed)
+  // 5. YouTube (watch, youtu.be, shorts, live, embed)
   // Handles all mobile app sharing, desktop, shorts, and query parameter variations
   let ytId: string | null = null;
   const ytMatch1 = raw.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|shorts\/|live\/))([a-zA-Z0-9_-]{11})/i);
@@ -84,11 +123,7 @@ export function parseVideoMedia(urlOrData?: string, videoData?: string): VideoMe
     };
   }
 
-  // 3. Google Drive Shared Video Link
-  // Handles:
-  // - https://drive.google.com/file/d/FILE_ID/view?usp=sharing
-  // - https://drive.google.com/open?id=FILE_ID
-  // - https://drive.google.com/file/d/FILE_ID/preview
+  // 6. Google Drive Shared Video Link
   const gdriveMatch = raw.match(/drive\.google\.com\/(?:file\/d\/|open\?id=)([a-zA-Z0-9_-]+)/i);
   if (gdriveMatch && gdriveMatch[1]) {
     const fileId = gdriveMatch[1];
@@ -101,7 +136,7 @@ export function parseVideoMedia(urlOrData?: string, videoData?: string): VideoMe
     };
   }
 
-  // 4. Vimeo
+  // 7. Vimeo
   const vimeoMatch = raw.match(
     /vimeo\.com\/(?:channels\/(?:\w+\/)?|groups\/(?:[^\/]*)\/videos\/|album\/(?:\d+)\/video\/|video\/|)(\d+)/i
   );
@@ -114,22 +149,17 @@ export function parseVideoMedia(urlOrData?: string, videoData?: string): VideoMe
     };
   }
 
-  // 5. Direct Web Video File URL (MP4, WebM, MOV, OGG, M4V, MKV, or /videos/...)
-  if (
-    raw.startsWith('/videos/') ||
-    raw.startsWith('./videos/') ||
-    ((raw.startsWith('http://') || raw.startsWith('https://') || raw.startsWith('/') || raw.startsWith('./')) &&
-      (/\.(mp4|webm|mov|ogg|m4v|mkv)(\?.*)?$/i.test(raw) || raw.includes('.mp4') || raw.includes('.webm')))
-  ) {
+  // 8. Direct Web Video File URL (MP4, WebM, MOV, OGG, M4V, MKV, 3GP)
+  if (/\.(mp4|webm|mov|ogg|m4v|mkv|3gp)(\?.*)?$/i.test(raw) || raw.includes('.mp4') || raw.includes('.webm')) {
     return {
       type: 'html5',
       src: raw,
       isDirectFile: true,
-      platformLabel: '직접 등록된 동영상 (MP4)'
+      platformLabel: '동영상 미디어'
     };
   }
 
-  // 6. Instagram Reels / Post
+  // 9. Instagram Reels / Post
   if (raw.includes('instagram.com/reel/') || raw.includes('instagram.com/p/')) {
     return {
       type: 'link',
@@ -138,7 +168,7 @@ export function parseVideoMedia(urlOrData?: string, videoData?: string): VideoMe
     };
   }
 
-  // 7. TikTok
+  // 10. TikTok
   if (raw.includes('tiktok.com/')) {
     return {
       type: 'link',
@@ -147,7 +177,7 @@ export function parseVideoMedia(urlOrData?: string, videoData?: string): VideoMe
     };
   }
 
-  // 8. Naver TV / Kakao TV
+  // 11. Naver TV / Kakao TV
   if (raw.includes('tv.naver.com') || raw.includes('tv.kakao.com')) {
     return {
       type: 'link',
@@ -156,7 +186,7 @@ export function parseVideoMedia(urlOrData?: string, videoData?: string): VideoMe
     };
   }
 
-  // 9. Generic Web URL
+  // 12. Generic Web URL
   if (/^https?:\/\//i.test(raw)) {
     return {
       type: 'link',
