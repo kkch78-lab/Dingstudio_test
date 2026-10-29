@@ -119,7 +119,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     return (
       <div className={`overflow-hidden rounded-2xl bg-black border border-slate-800 shadow-md ${className}`}>
         <video
-          key={media.src.substring(0, 40)}
+          key={media.src}
           src={media.src}
           controls
           playsInline
@@ -127,6 +127,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           onError={() => setHasError(true)}
           className={`w-full bg-black ${compact ? 'max-h-48 object-cover' : 'max-h-[480px] object-contain'}`}
         >
+          <source src={media.src} type="video/mp4" />
+          <source src={media.src} type="video/webm" />
           해당 브라우저에서 동영상 재생을 지원하지 않습니다.
         </video>
         {!compact && (

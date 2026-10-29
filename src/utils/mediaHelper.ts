@@ -61,24 +61,26 @@ export function parseVideoMedia(urlOrData?: string, videoData?: string): VideoMe
   }
 
   // 2. YouTube (watch, youtu.be, shorts, live, embed)
-  // Handles:
-  // - https://www.youtube.com/watch?v=VIDEO_ID
-  // - https://youtu.be/VIDEO_ID?si=...
-  // - https://www.youtube.com/shorts/VIDEO_ID
-  // - https://www.youtube.com/live/VIDEO_ID
-  // - https://youtube.com/embed/VIDEO_ID
-  const ytMatch = raw.match(
-    /(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?.*v=|shorts\/|live\/))([\w-]{11})/i
-  );
-  if (ytMatch && ytMatch[1]) {
-    const videoId = ytMatch[1];
+  // Handles all mobile app sharing, desktop, shorts, and query parameter variations
+  let ytId: string | null = null;
+  const ytMatch1 = raw.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|shorts\/|live\/))([a-zA-Z0-9_-]{11})/i);
+  if (ytMatch1 && ytMatch1[1]) {
+    ytId = ytMatch1[1];
+  } else {
+    const ytMatch2 = raw.match(/[?&]v=([a-zA-Z0-9_-]{11})/i);
+    if (ytMatch2 && ytMatch2[1]) {
+      ytId = ytMatch2[1];
+    }
+  }
+
+  if (ytId) {
     return {
       type: 'youtube',
       src: raw,
-      videoId,
-      embedUrl: `https://www.youtube-nocookie.com/embed/${videoId}?autoplay=0&rel=0&modestbranding=1&playsinline=1`,
-      thumbnailUrl: `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`,
-      platformLabel: 'YouTube 동영상 / 쇼츠'
+      videoId: ytId,
+      embedUrl: `https://www.youtube-nocookie.com/embed/${ytId}?autoplay=0&rel=0&modestbranding=1&playsinline=1`,
+      thumbnailUrl: `https://img.youtube.com/vi/${ytId}/hqdefault.jpg`,
+      platformLabel: raw.includes('shorts') ? 'YouTube 쇼츠 (Shorts)' : 'YouTube 동영상'
     };
   }
 
@@ -86,12 +88,14 @@ export function parseVideoMedia(urlOrData?: string, videoData?: string): VideoMe
   // Handles:
   // - https://drive.google.com/file/d/FILE_ID/view?usp=sharing
   // - https://drive.google.com/open?id=FILE_ID
+  // - https://drive.google.com/file/d/FILE_ID/preview
   const gdriveMatch = raw.match(/drive\.google\.com\/(?:file\/d\/|open\?id=)([a-zA-Z0-9_-]+)/i);
   if (gdriveMatch && gdriveMatch[1]) {
     const fileId = gdriveMatch[1];
     return {
       type: 'gdrive',
       src: raw,
+      videoId: fileId,
       embedUrl: `https://drive.google.com/file/d/${fileId}/preview`,
       platformLabel: '구글 드라이브 비디오 (Google Drive)'
     };
@@ -110,10 +114,12 @@ export function parseVideoMedia(urlOrData?: string, videoData?: string): VideoMe
     };
   }
 
-  // 5. Direct Web Video File URL (MP4, WebM, MOV, OGG, M4V, MKV)
+  // 5. Direct Web Video File URL (MP4, WebM, MOV, OGG, M4V, MKV, or /videos/...)
   if (
-    (raw.startsWith('http://') || raw.startsWith('https://') || raw.startsWith('/') || raw.startsWith('./')) &&
-    /\.(mp4|webm|mov|ogg|m4v|mkv)(\?.*)?$/i.test(raw)
+    raw.startsWith('/videos/') ||
+    raw.startsWith('./videos/') ||
+    ((raw.startsWith('http://') || raw.startsWith('https://') || raw.startsWith('/') || raw.startsWith('./')) &&
+      (/\.(mp4|webm|mov|ogg|m4v|mkv)(\?.*)?$/i.test(raw) || raw.includes('.mp4') || raw.includes('.webm')))
   ) {
     return {
       type: 'html5',

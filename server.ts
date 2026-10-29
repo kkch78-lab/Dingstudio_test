@@ -40,9 +40,118 @@ async function startServer() {
   app.use(express.json({ limit: '100mb' }));
   app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
+  // Static route for uploaded videos
+  const videosDir = path.join(__dirname, 'public', 'videos');
+  if (!fs.existsSync(videosDir)) {
+    try {
+      fs.mkdirSync(videosDir, { recursive: true });
+    } catch (e) {
+      console.warn('Could not create videos directory:', e);
+    }
+  }
+  app.use('/videos', express.static(videosDir));
+
+  // Static route for uploaded photos/images
+  const imagesDir = path.join(__dirname, 'public', 'images');
+  if (!fs.existsSync(imagesDir)) {
+    try {
+      fs.mkdirSync(imagesDir, { recursive: true });
+    } catch (e) {
+      console.warn('Could not create images directory:', e);
+    }
+  }
+  app.use('/images', express.static(imagesDir));
+
+  // Photo Upload API: Saves uploaded photo files to /public/images for fast permanent display across all devices
+  app.post('/api/upload-image', (req, res) => {
+    try {
+      const { fileName, fileData } = req.body;
+      if (!fileData) {
+        res.status(400).json({ success: false, message: 'No image data provided' });
+        return;
+      }
+
+      const base64Data = fileData.includes(';base64,')
+        ? fileData.split(';base64,')[1]
+        : fileData;
+
+      const buffer = Buffer.from(base64Data, 'base64');
+      const ext = path.extname(fileName || 'image.jpg') || '.jpg';
+      const baseCleanName = path.basename(fileName || 'image', ext).replace(/[^a-zA-Z0-9_-]/g, '_');
+      const uniqueFileName = `wongok_img_${Date.now()}_${Math.random().toString(36).substring(2, 7)}_${baseCleanName}${ext}`;
+      const filePath = path.join(imagesDir, uniqueFileName);
+
+      fs.writeFileSync(filePath, buffer);
+
+      // Also ensure dist/images has it if running in prod
+      const distImagesDir = path.join(__dirname, 'dist', 'images');
+      if (fs.existsSync(path.join(__dirname, 'dist'))) {
+        if (!fs.existsSync(distImagesDir)) {
+          fs.mkdirSync(distImagesDir, { recursive: true });
+        }
+        fs.writeFileSync(path.join(distImagesDir, uniqueFileName), buffer);
+      }
+
+      const imageUrl = `/images/${uniqueFileName}`;
+      res.json({
+        success: true,
+        imageUrl,
+        fileName: uniqueFileName,
+        size: buffer.length
+      });
+    } catch (err: any) {
+      console.error('Error saving image:', err);
+      res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
+  // Video Upload API: Saves uploaded video files to /public/videos for fast permanent streaming across all devices
+  app.post('/api/upload-video', (req, res) => {
+    try {
+      const { fileName, fileData } = req.body;
+      if (!fileData) {
+        res.status(400).json({ success: false, message: 'No video data provided' });
+        return;
+      }
+
+      // Extract base64 payload from data URL if present
+      const base64Data = fileData.includes(';base64,')
+        ? fileData.split(';base64,')[1]
+        : fileData;
+
+      const buffer = Buffer.from(base64Data, 'base64');
+      const ext = path.extname(fileName || 'video.mp4') || '.mp4';
+      const baseCleanName = path.basename(fileName || 'video', ext).replace(/[^a-zA-Z0-9_-]/g, '_');
+      const uniqueFileName = `wongok_${Date.now()}_${Math.random().toString(36).substring(2, 7)}_${baseCleanName}${ext}`;
+      const filePath = path.join(videosDir, uniqueFileName);
+
+      fs.writeFileSync(filePath, buffer);
+
+      // Also ensure dist/videos has it if running in prod
+      const distVideosDir = path.join(__dirname, 'dist', 'videos');
+      if (fs.existsSync(path.join(__dirname, 'dist'))) {
+        if (!fs.existsSync(distVideosDir)) {
+          fs.mkdirSync(distVideosDir, { recursive: true });
+        }
+        fs.writeFileSync(path.join(distVideosDir, uniqueFileName), buffer);
+      }
+
+      const videoUrl = `/videos/${uniqueFileName}`;
+      res.json({
+        success: true,
+        videoUrl,
+        fileName: uniqueFileName,
+        size: buffer.length
+      });
+    } catch (err: any) {
+      console.error('Error saving video:', err);
+      res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
   // API Routes
   app.get('/api/posts', (_req, res) => {
-    const posts = getStoredPosts();
+    const posts = getStoredPosts() || [];
     res.json({ success: true, posts });
   });
 

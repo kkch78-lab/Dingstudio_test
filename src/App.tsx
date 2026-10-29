@@ -69,6 +69,7 @@ export function App() {
             category: p.category === '학생체육지원단' ? '체육대회' : p.category,
             imageUrl: p.imageUrl || init.imageUrl,
             imageFileName: p.imageFileName || init.imageFileName,
+            videoUrl: p.videoUrl || init.videoUrl,
             videoData: p.videoData || init.videoData,
             videoFileName: p.videoFileName || init.videoFileName,
             videoSourceType: p.videoSourceType || init.videoSourceType
@@ -88,7 +89,63 @@ export function App() {
     }
   });
 
-  // 🚀 Real-time Cloud Sync with Firebase Firestore across ALL devices (PC, Mobile, etc.)
+  // 🚀 1. Real-time Background Sync from Server (/api/posts) - Synchronizes instantly across PC, Mobile, and all visitors
+  useEffect(() => {
+    let isMounted = true;
+    const fetchServerPosts = async () => {
+      try {
+        const res = await fetch('/api/posts');
+        if (res.ok) {
+          const data = await res.json();
+          if (data.success && Array.isArray(data.posts) && data.posts.length > 0) {
+            if (!isMounted) return;
+            setPosts((prevPosts) => {
+              const prevMap = new Map<string, Post>(prevPosts.map((p) => [p.id, p]));
+              const merged: Post[] = [];
+
+              for (const sPost of data.posts as Post[]) {
+                const existing = prevMap.get(sPost.id);
+                if (existing) {
+                  merged.push({
+                    ...sPost,
+                    imageUrl: sPost.imageUrl || existing.imageUrl,
+                    imageFileName: sPost.imageFileName || existing.imageFileName,
+                    videoUrl: sPost.videoUrl || existing.videoUrl,
+                    videoData: sPost.videoData || existing.videoData,
+                    videoFileName: sPost.videoFileName || existing.videoFileName,
+                    views: Math.max(existing.views || 0, sPost.views || 0)
+                  });
+                  prevMap.delete(sPost.id);
+                } else {
+                  merged.push(sPost);
+                }
+              }
+
+              // Keep any posts created locally that might not be on server yet
+              for (const remaining of prevMap.values()) {
+                merged.push(remaining);
+              }
+
+              merged.sort((a, b) => (b.date || '').localeCompare(a.date || '') || b.id.localeCompare(a.id));
+              return merged;
+            });
+          }
+        }
+      } catch {
+        // Fallback silently if offline
+      }
+    };
+
+    fetchServerPosts();
+    const interval = setInterval(fetchServerPosts, 3500);
+
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, []);
+
+  // 🚀 2. Real-time Cloud Sync with Firebase Firestore across ALL devices (PC, Mobile, etc.)
   useEffect(() => {
     let unsubscribe: (() => void) | undefined;
     try {
@@ -103,24 +160,41 @@ export function App() {
               const data = docSnap.data() as Post;
               remotePosts.push({ ...data, id: docSnap.id });
             });
-            // Sort by date / id descending
-            remotePosts.sort((a, b) => (b.date || '').localeCompare(a.date || '') || b.id.localeCompare(a.id));
-            setPosts(remotePosts);
-          } else {
-            // Seed INITIAL_POSTS into Firestore so cloud database starts populated for everyone
-            INITIAL_POSTS.forEach((initPost) => {
-              setDoc(doc(db, 'posts', initPost.id), initPost).catch((err) => {
-                handleFirestoreError(err, OperationType.CREATE, `posts/${initPost.id}`);
-              });
+            setPosts((prevPosts) => {
+              const prevMap = new Map<string, Post>(prevPosts.map((p) => [p.id, p]));
+              const merged: Post[] = [];
+              for (const rPost of remotePosts) {
+                const existing = prevMap.get(rPost.id);
+                if (existing) {
+                  merged.push({
+                    ...rPost,
+                    imageUrl: rPost.imageUrl || existing.imageUrl,
+                    imageFileName: rPost.imageFileName || existing.imageFileName,
+                    videoUrl: rPost.videoUrl || existing.videoUrl,
+                    videoData: rPost.videoData || existing.videoData,
+                    videoFileName: rPost.videoFileName || existing.videoFileName,
+                    views: Math.max(existing.views || 0, rPost.views || 0)
+                  });
+                  prevMap.delete(rPost.id);
+                } else {
+                  merged.push(rPost);
+                }
+              }
+              for (const remaining of prevMap.values()) {
+                merged.push(remaining);
+              }
+              merged.sort((a, b) => (b.date || '').localeCompare(a.date || '') || b.id.localeCompare(a.id));
+              return merged;
             });
           }
         },
         (error) => {
-          handleFirestoreError(error, OperationType.GET, 'posts');
+          // Gracefully handle Firestore quota/offline without resetting state or disrupting user
+          console.warn('Firestore sync note:', error.message);
         }
       );
     } catch (err) {
-      handleFirestoreError(err, OperationType.GET, 'posts');
+      console.warn('Firestore subscription notice:', err);
     }
 
     return () => {
@@ -166,6 +240,7 @@ export function App() {
 
   const [activeReaderPost, setActiveReaderPost] = useState<Post | null>(null);
   const [searchQuery, setSearchQuery] = useState<string>('');
+  const [homeFilter, setHomeFilter] = useState<string>('all');
   const [toast, setToast] = useState<ToastInfo | null>(null);
   const [announcementIdx, setAnnouncementIdx] = useState<number>(0);
 
@@ -181,9 +256,11 @@ export function App() {
   const [formImageFileName, setFormImageFileName] = useState<string>('');
   const [formImageFileSize, setFormImageFileSize] = useState<number>(0);
   const [isImageLoading, setIsImageLoading] = useState<boolean>(false);
+  const [formVideoUrl, setFormVideoUrl] = useState<string>('');
   const [formVideoData, setFormVideoData] = useState<string>('');
   const [formVideoFileName, setFormVideoFileName] = useState<string>('');
   const [formVideoFileSize, setFormVideoFileSize] = useState<number>(0);
+  const [videoInputMode, setVideoInputMode] = useState<'link' | 'file'>('link');
   const [isVideoLoading, setIsVideoLoading] = useState<boolean>(false);
 
   // Toast Helper
@@ -251,25 +328,31 @@ export function App() {
     return () => clearInterval(timer);
   }, []);
 
-  // Hydrate videos and images from IndexedDB on initial mount
+  // Hydrate videos and images from IndexedDB safely without clobbering incoming server posts
   useEffect(() => {
     const hydrateMedia = async () => {
       try {
-        const hydrated = await Promise.all(
-          posts.map(async (p: Post) => {
-            let updated = { ...p };
+        setPosts((currentPosts) => {
+          currentPosts.forEach(async (p) => {
             if ((p.hasStoredVideo || !p.videoData) && (p.videoFileName || p.videoSourceType === 'file')) {
               const cachedVideo = await loadVideoMedia(p.id);
-              if (cachedVideo) updated.videoData = cachedVideo;
+              if (cachedVideo) {
+                setPosts((prev) =>
+                  prev.map((item) => (item.id === p.id && !item.videoData ? { ...item, videoData: cachedVideo } : item))
+                );
+              }
             }
             if ((p.hasStoredImage || !p.imageUrl) && (p.imageFileName || p.hasStoredImage)) {
               const cachedImg = await loadVideoMedia('img_' + p.id);
-              if (cachedImg) updated.imageUrl = cachedImg;
+              if (cachedImg) {
+                setPosts((prev) =>
+                  prev.map((item) => (item.id === p.id && !item.imageUrl ? { ...item, imageUrl: cachedImg } : item))
+                );
+              }
             }
-            return updated;
-          })
-        );
-        setPosts(hydrated);
+          });
+          return currentPosts;
+        });
       } catch {
         // Silently fallback
       }
@@ -331,6 +414,25 @@ export function App() {
 
     return result;
   }, [posts, currentTab, searchQuery]);
+
+  // Filtered posts for the Home Tab
+  const homePosts = useMemo(() => {
+    let result = posts;
+    if (homeFilter !== 'all') {
+      if (homeFilter === '자유') {
+        result = result.filter((p) => p.category === '자유');
+      } else if (homeFilter === '스포츠클럽') {
+        result = result.filter((p) => p.category === '스포츠클럽');
+      } else if (homeFilter === '체육대회') {
+        result = result.filter((p) => p.category === '체육대회' || p.category === '학생체육지원단');
+      } else if (homeFilter === '내가 바로 원곡 릴스꾼') {
+        result = result.filter((p) => p.category === '내가 바로 원곡 릴스꾼');
+      } else if (homeFilter === '학생심판지원단(기자단)') {
+        result = result.filter((p) => p.category === '학생심판지원단(기자단)' || p.category === '학생심판지원단');
+      }
+    }
+    return result;
+  }, [posts, homeFilter]);
 
   // Auth Handler
   const isManager = userRole === 'admin' || userRole === 'student_council';
@@ -395,9 +497,11 @@ export function App() {
     setFormImageFileName('');
     setFormImageFileSize(0);
     setIsImageLoading(false);
+    setFormVideoUrl('');
     setFormVideoData('');
     setFormVideoFileName('');
     setFormVideoFileSize(0);
+    setVideoInputMode('link');
     setIsVideoLoading(false);
     setIsPostModalOpen(true);
   };
@@ -423,9 +527,11 @@ export function App() {
     setFormImageFileName(post.imageFileName || '');
     setFormImageFileSize(post.imageFileSize || 0);
     setIsImageLoading(false);
+    setFormVideoUrl(post.videoUrl || '');
     setFormVideoData(post.videoData || '');
     setFormVideoFileName(post.videoFileName || '');
     setFormVideoFileSize(post.videoFileSize || 0);
+    setVideoInputMode(post.videoUrl ? 'link' : post.videoData ? 'file' : 'link');
     setIsVideoLoading(false);
 
     // If media is empty but stored in IndexedDB, fetch it for editor
@@ -478,12 +584,14 @@ export function App() {
       imageFileName: formImageFileName,
       imageFileSize: formImageFileSize,
       hasStoredImage: Boolean(formImageUrl),
-      videoUrl: undefined,
+      videoUrl: formVideoUrl.trim() || undefined,
       videoData: formVideoData,
       videoFileName: formVideoFileName,
       videoFileSize: formVideoFileSize,
-      hasStoredVideo: Boolean(formVideoData),
-      videoSourceType: formVideoData ? 'file' : undefined
+      hasStoredVideo: Boolean(formVideoData || formVideoUrl.trim()),
+      videoSourceType: formVideoUrl.trim()
+        ? (formVideoUrl.includes('youtube') || formVideoUrl.includes('youtu.be') ? 'youtube' : 'link')
+        : formVideoData ? 'file' : undefined
     };
 
     // Store in IndexedDB for reliable high-capacity video & photo persistence
@@ -722,6 +830,28 @@ export function App() {
       setFormImageUrl(optimized.dataUrl);
       setFormImageFileName(optimized.fileName);
       setFormImageFileSize(optimized.optimizedSize);
+
+      // Upload to server so photo gets a static permanent URL playable across all devices
+      try {
+        const uploadRes = await fetch('/api/upload-image', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            fileName: optimized.fileName,
+            fileData: optimized.dataUrl
+          })
+        });
+        if (uploadRes.ok) {
+          const uploadData = await uploadRes.json();
+          if (uploadData.success && uploadData.imageUrl) {
+            setFormImageUrl(uploadData.imageUrl);
+            setFormImageFileName(uploadData.fileName || optimized.fileName);
+          }
+        }
+      } catch (uploadErr) {
+        console.warn('Server image upload fallback:', uploadErr);
+      }
+
       setIsImageLoading(false);
 
       const origSize = optimized.originalSize > 1024 * 1024
@@ -729,14 +859,30 @@ export function App() {
         : `${Math.round(optimized.originalSize / 1024)}KB`;
       const optSize = `${Math.round(optimized.optimizedSize / 1024)}KB`;
 
-      showToast(`사진 최적화 완료! (${origSize} → ${optSize})`, 'success');
+      showToast(`사진 최적화 및 등록 완료! (${origSize} → ${optSize})`, 'success');
     } catch (err: any) {
       console.warn('Image optimization fallback:', err);
       const reader = new FileReader();
-      reader.onload = () => {
+      reader.onload = async () => {
         if (typeof reader.result === 'string') {
-          setFormImageUrl(reader.result);
+          const rawData = reader.result;
+          setFormImageUrl(rawData);
           setFormImageFileSize(file.size);
+
+          try {
+            const uploadRes = await fetch('/api/upload-image', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ fileName: file.name, fileData: rawData })
+            });
+            if (uploadRes.ok) {
+              const uploadData = await uploadRes.json();
+              if (uploadData.success && uploadData.imageUrl) {
+                setFormImageUrl(uploadData.imageUrl);
+              }
+            }
+          } catch {}
+
           setIsImageLoading(false);
           showToast(`사진 [${file.name}] 첨부 완료`, 'success');
         }
@@ -757,42 +903,276 @@ export function App() {
     showToast('첨부된 사진이 삭제되었습니다.', 'info');
   };
 
-  // Video File Upload (Supports MP4, MOV, WebM, 숏폼/릴스 up to 100MB with zero loss)
-  const handleVideoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Video File Upload (Supports MP4, MOV, WebM, 숏폼/릴스 up to 100MB with zero loss & cross-device streaming)
+  const handleVideoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      if (file.size > 100 * 1024 * 1024) {
-        showToast('동영상 파일 용량은 최대 100MB까지 지원됩니다.', 'error');
-        return;
-      }
+    if (!file) return;
 
-      setIsVideoLoading(true);
-      setFormVideoFileName(file.name);
-      setFormVideoFileSize(file.size);
-
-      const reader = new FileReader();
-      reader.onload = () => {
-        if (typeof reader.result === 'string') {
-          setFormVideoData(reader.result);
-          setIsVideoLoading(false);
-          const sizeMB = (file.size / (1024 * 1024)).toFixed(1);
-          showToast(`동영상 [${file.name}] (${sizeMB}MB) 준비가 완료되었습니다.`, 'success');
-        }
-      };
-      reader.onerror = () => {
-        setIsVideoLoading(false);
-        showToast('동영상 처리 중 오류가 발생했습니다.', 'error');
-      };
-      reader.readAsDataURL(file);
+    if (file.size > 100 * 1024 * 1024) {
+      showToast('동영상 파일 용량은 최대 100MB까지 지원됩니다.', 'error');
+      return;
     }
+
+    setIsVideoLoading(true);
+    setFormVideoFileName(file.name);
+    setFormVideoFileSize(file.size);
+
+    const reader = new FileReader();
+    reader.onload = async () => {
+      if (typeof reader.result === 'string') {
+        const dataUrl = reader.result;
+        setFormVideoData(dataUrl);
+
+        // Upload to server so video gets a static URL playable across all devices and link visitors
+        try {
+          const res = await fetch('/api/upload-video', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              fileName: file.name,
+              fileData: dataUrl
+            })
+          });
+
+          if (res.ok) {
+            const data = await res.json();
+            if (data.success && data.videoUrl) {
+              setFormVideoUrl(data.videoUrl);
+              setFormVideoFileName(data.fileName || file.name);
+              setIsVideoLoading(false);
+              const sizeMB = (file.size / (1024 * 1024)).toFixed(1);
+              showToast(`🎉 동영상 [${file.name}] (${sizeMB}MB) 준비 완료! 모든 기기에서 즉시 재생됩니다.`, 'success');
+              return;
+            }
+          }
+        } catch (serverErr) {
+          console.warn('Server video upload fallback:', serverErr);
+        }
+
+        // Fallback for static environments without server upload
+        setIsVideoLoading(false);
+        const sizeMB = (file.size / (1024 * 1024)).toFixed(1);
+        if (file.size <= 700 * 1024) {
+          showToast(`동영상 [${file.name}] (${sizeMB}MB) 준비가 완료되었습니다.`, 'success');
+        } else {
+          showToast(`동영상 등록 완료! 모든 학생·방문자에게 버퍼링 없이 공유하려면 유튜브 쇼츠/구글 드라이브 링크 등록도 추천합니다.`, 'info');
+        }
+      }
+    };
+    reader.onerror = () => {
+      setIsVideoLoading(false);
+      showToast('동영상 처리 중 오류가 발생했습니다.', 'error');
+    };
+    reader.readAsDataURL(file);
   };
 
   const handleRemoveVideo = () => {
+    setFormVideoUrl('');
     setFormVideoData('');
     setFormVideoFileName('');
     setFormVideoFileSize(0);
     setIsVideoLoading(false);
     showToast('첨부된 동영상이 삭제되었습니다.', 'info');
+  };
+
+  // Reusable Post Card Component
+  const renderPostCard = (post: Post, isHomeFeed: boolean = false) => {
+    return (
+      <div
+        key={`${isHomeFeed ? 'home-' : ''}post-${post.id}`}
+        id={`${isHomeFeed ? 'home-' : ''}post-card-${post.id}`}
+        onClick={() => handleOpenReader(post)}
+        className="bg-white border border-slate-200 hover:border-emerald-500/40 hover:shadow-md cursor-pointer rounded-2xl p-5 shadow-sm transition-all flex flex-col justify-between"
+      >
+        <div>
+          {/* Top Category & Author */}
+          <div className="flex items-center justify-between mb-3 text-[11px] font-bold">
+            <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200">
+              {post.category}
+            </span>
+            <span className="flex items-center gap-1 text-slate-500 font-medium">
+              <User className="w-3 h-3" />
+              {post.author}
+            </span>
+          </div>
+
+          {post.isFlagged && (
+            <div className="mb-2 px-2.5 py-1 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-[10px] font-bold flex items-center gap-1">
+              <CircleAlert className="w-3 h-3 text-amber-600 shrink-0" />
+              <span>학생자치회 검토 게시물 (전체 공개)</span>
+            </div>
+          )}
+
+          <div>
+            {/* Media Preview: Image or Video */}
+            {post.imageUrl ? (
+              <div className="mb-3 rounded-xl overflow-hidden max-h-40 bg-slate-100 border border-slate-200 relative group">
+                <img
+                  src={post.imageUrl}
+                  alt={post.title}
+                  className="w-full h-36 object-cover hover:scale-105 transition-transform duration-300"
+                  onError={(e) => {
+                    (e.target as HTMLImageElement).style.display = 'none';
+                  }}
+                />
+                {post.imageFileName && (
+                  <span className="absolute bottom-2 left-2 px-2 py-0.5 rounded-md bg-black/75 text-[10px] font-bold text-emerald-300 flex items-center gap-1 backdrop-blur-sm">
+                    <ImageIcon className="w-3 h-3" />
+                    <span>사진</span>
+                  </span>
+                )}
+                {(post.videoUrl || post.videoData || post.videoFileName) && (
+                  <div className="absolute inset-0 flex items-center justify-center bg-black/20 group-hover:bg-black/10 transition-all">
+                    <div className="w-10 h-10 rounded-full bg-rose-600/90 text-white flex items-center justify-center shadow-lg group-hover:scale-110 transition-transform">
+                      <Play className="w-5 h-5 fill-white ml-0.5" />
+                    </div>
+                    <span className="absolute bottom-2 right-2 px-2 py-0.5 rounded-md bg-rose-600/90 text-[10px] font-bold text-white flex items-center gap-1 backdrop-blur-sm">
+                      <Film className="w-3 h-3" />
+                      <span>영상 재생</span>
+                    </span>
+                  </div>
+                )}
+              </div>
+            ) : (post.videoData || post.videoUrl || post.videoFileName) ? (
+              <div className="mb-3 rounded-xl overflow-hidden bg-slate-950 border border-slate-800 relative group">
+                {(() => {
+                  const media = parseVideoMedia(post.videoUrl, post.videoData);
+                  const directVideoSrc = (media.type === 'html5' && media.src) ? media.src : (post.videoUrl || post.videoData);
+
+                  if (media.thumbnailUrl) {
+                    return (
+                      <div className="relative w-full h-36 bg-black flex items-center justify-center overflow-hidden">
+                        <img
+                          src={media.thumbnailUrl}
+                          alt={post.title}
+                          className="w-full h-full object-cover opacity-90 group-hover:scale-105 transition-transform duration-300"
+                        />
+                        <div className="absolute inset-0 flex items-center justify-center bg-black/30 group-hover:bg-black/20 transition-all">
+                          <div className="w-10 h-10 rounded-full bg-rose-600 text-white flex items-center justify-center shadow-lg group-hover:scale-110 transition-transform">
+                            <Play className="w-5 h-5 fill-white ml-0.5" />
+                          </div>
+                        </div>
+                        <span className="absolute bottom-2 left-2 px-2 py-0.5 rounded-md bg-black/75 text-[10px] font-bold text-rose-300 flex items-center gap-1">
+                          <Film className="w-3 h-3" />
+                          <span>{media.platformLabel || 'YouTube 영상'}</span>
+                        </span>
+                      </div>
+                    );
+                  }
+
+                  if (directVideoSrc && (media.type === 'html5' || directVideoSrc.startsWith('/videos/') || directVideoSrc.startsWith('http') || directVideoSrc.startsWith('data:'))) {
+                    return (
+                      <div className="relative w-full h-36 bg-black flex items-center justify-center">
+                        <video
+                          src={directVideoSrc}
+                          preload="metadata"
+                          playsInline
+                          className="w-full h-36 object-cover opacity-80"
+                        />
+                        <div className="absolute inset-0 flex items-center justify-center bg-black/30 group-hover:bg-black/20 transition-all">
+                          <div className="w-10 h-10 rounded-full bg-rose-500/90 text-white flex items-center justify-center shadow-lg group-hover:scale-110 transition-transform">
+                            <Play className="w-5 h-5 fill-white ml-0.5" />
+                          </div>
+                        </div>
+                        <span className="absolute bottom-2 left-2 px-2 py-0.5 rounded-md bg-black/70 text-[10px] font-bold text-emerald-300 flex items-center gap-1">
+                          <Film className="w-3 h-3" />
+                          <span className="truncate max-w-[140px]">{post.videoFileName || '동영상 재생'}</span>
+                        </span>
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <div className="relative w-full h-36 bg-gradient-to-br from-slate-900 via-rose-950/40 to-slate-900 flex flex-col items-center justify-center p-3 text-center">
+                      <div className="w-10 h-10 rounded-full bg-rose-500 text-white flex items-center justify-center shadow-lg group-hover:scale-110 transition-transform mb-1.5">
+                        <Play className="w-5 h-5 fill-white ml-0.5" />
+                      </div>
+                      <span className="text-[11px] font-bold text-rose-200 truncate max-w-full px-2">
+                        {post.videoFileName || media.platformLabel || '영상 미디어 재생'}
+                      </span>
+                    </div>
+                  );
+                })()}
+              </div>
+            ) : null}
+            <h4 className="font-extrabold text-slate-900 text-sm md:text-base mb-1.5 line-clamp-2 leading-snug hover:text-emerald-800 transition-colors">
+              {post.title}
+            </h4>
+            <p className="text-slate-500 text-xs leading-relaxed line-clamp-3 mb-4">
+              {post.content}
+            </p>
+          </div>
+        </div>
+
+        {/* Footer Actions */}
+        <div className="pt-3.5 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-400 font-bold">
+          <span className="flex items-center gap-1">
+            <Calendar className="w-3 h-3" />
+            {post.date}
+          </span>
+
+          <div className="flex items-center gap-2">
+            <span className="flex items-center gap-1">
+              <Eye className="w-3.5 h-3.5" />
+              {post.views}
+            </span>
+
+            {(post.fileUrl || post.fileData) && (
+              <span className="p-1 rounded bg-emerald-50 text-emerald-800" title="첨부파일 있음">
+                <FileDown className="w-3.5 h-3.5" />
+              </span>
+            )}
+
+            {(post.videoUrl || post.videoData) && (
+              <span className="p-1 rounded bg-rose-50 text-rose-700 flex items-center gap-0.5" title={post.videoData ? '직접 첨부 영상' : '영상 링크'}>
+                <Play className="w-3.5 h-3.5 fill-rose-700" />
+              </span>
+            )}
+
+            {/* Blind Toggle Button for Student Council & Admin */}
+            {isManager && (
+              <button
+                onClick={(e) => handleToggleFlag(post.id, e)}
+                className={`p-1.5 rounded-lg border transition-colors ${
+                  post.isFlagged
+                    ? 'bg-amber-500 text-white border-amber-600'
+                    : 'text-slate-400 border-slate-200 hover:text-amber-600 hover:bg-amber-50'
+                }`}
+                title={post.isFlagged ? '블라인드 해제' : '블라인드 처리'}
+              >
+                <Shield className="w-3.5 h-3.5" />
+              </button>
+            )}
+
+            {/* Edit & Delete: ONLY for Authenticated Managers (Teachers / Student Council) */}
+            {isManager && (
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    openEditPost(post);
+                  }}
+                  className="p-1.5 rounded-lg border border-slate-200 text-slate-500 hover:text-emerald-800 hover:bg-emerald-50 hover:border-emerald-300 transition-colors flex items-center gap-1 text-[11px] font-bold"
+                  title="운영진 권한: 게시물 수정"
+                >
+                  <Pencil className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">수정</span>
+                </button>
+
+                <button
+                  onClick={(e) => handleDeletePost(post.id, e)}
+                  className="p-1.5 rounded-lg border border-slate-200 text-slate-400 hover:text-rose-600 hover:bg-rose-50 hover:border-rose-300 transition-colors flex items-center gap-1 text-[11px] font-bold"
+                  title="운영진 권한: 게시물 삭제"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">삭제</span>
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
   };
 
   return (
@@ -1251,6 +1631,76 @@ export function App() {
                 </div>
               </div>
             </div>
+
+            {/* Real-time Live Posts & Reels Feed on Home Tab */}
+            <div id="home-live-posts-section" className="space-y-4 pt-2">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white p-5 rounded-3xl border border-slate-200 shadow-sm">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="w-2.5 h-5 bg-rose-500 rounded" />
+                    <h3 className="text-slate-900 font-black text-lg md:text-xl">
+                      원곡 스포츠 실시간 전체 소식 & 릴스
+                    </h3>
+                    <span className="text-[11px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2.5 py-0.5 rounded-full">
+                      실시간 공유 {homePosts.length}건
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-500 font-medium mt-1">
+                    PC, 스마트폰, 링크를 보는 모든 학생과 방문자가 즉시 확인하고 공유할 수 있는 실시간 종합 마당입니다.
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    onClick={() => openAddPost()}
+                    className="bg-[#ff1e56] hover:bg-[#e01448] text-white font-extrabold text-xs px-4 py-2.5 rounded-xl flex items-center gap-1.5 transition-all shadow-md shadow-rose-200"
+                  >
+                    <CirclePlus className="w-4 h-4" />
+                    <span>소식/자료 등록</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Category Filter Pills on Home Tab */}
+              <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1">
+                {[
+                  { id: 'all', label: '전체 소식' },
+                  { id: '자유', label: '자유' },
+                  { id: '스포츠클럽', label: '스포츠클럽' },
+                  { id: '체육대회', label: '체육대회' },
+                  { id: '내가 바로 원곡 릴스꾼', label: '릴스 숏폼' },
+                  { id: '학생심판지원단(기자단)', label: '심판단(기자단)' }
+                ].map((pill) => {
+                  const isActive = homeFilter === pill.id;
+                  return (
+                    <button
+                      key={pill.id}
+                      onClick={() => setHomeFilter(pill.id)}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap transition-all border ${
+                        isActive
+                          ? 'bg-[#064e3b] text-white border-[#064e3b] shadow-xs'
+                          : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
+                      }`}
+                    >
+                      {pill.label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Posts Grid */}
+              {homePosts.length === 0 ? (
+                <div className="bg-white rounded-3xl border border-slate-200 p-10 text-center space-y-2">
+                  <FileText className="w-10 h-10 text-slate-300 mx-auto" />
+                  <h4 className="font-bold text-slate-700 text-sm">해당 영역에 등록된 소식이 없습니다.</h4>
+                  <p className="text-xs text-slate-400">첫 번째 자료나 릴스를 직접 올려보세요!</p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+                  {homePosts.map((post) => renderPostCard(post, true))}
+                </div>
+              )}
+            </div>
           </div>
         ) : (
           /* Sub-Board View (자유, 스포츠클럽, 학생체육지원단, 내가 바로 원곡 릴스꾼, 학생심판지원단) */
@@ -1327,188 +1777,7 @@ export function App() {
               </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
-                {filteredPosts.map((post) => {
-                  return (
-                    <div
-                      key={post.id}
-                      id={`post-card-${post.id}`}
-                      onClick={() => handleOpenReader(post)}
-                      className="bg-white border border-slate-200 hover:border-emerald-500/40 hover:shadow-md cursor-pointer rounded-2xl p-5 shadow-sm transition-all flex flex-col justify-between"
-                    >
-                      <div>
-                        {/* Top Category & Author */}
-                        <div className="flex items-center justify-between mb-3 text-[11px] font-bold">
-                          <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200">
-                            {post.category}
-                          </span>
-                          <span className="flex items-center gap-1 text-slate-500 font-medium">
-                            <User className="w-3 h-3" />
-                            {post.author}
-                          </span>
-                        </div>
-
-                        {post.isFlagged && (
-                          <div className="mb-2 px-2.5 py-1 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-[10px] font-bold flex items-center gap-1">
-                            <CircleAlert className="w-3 h-3 text-amber-600 shrink-0" />
-                            <span>학생자치회 검토 게시물 (전체 공개)</span>
-                          </div>
-                        )}
-
-                        <div>
-                          {/* Media Preview: Image or Video */}
-                          {post.imageUrl ? (
-                            <div className="mb-3 rounded-xl overflow-hidden max-h-40 bg-slate-100 border border-slate-200 relative group">
-                              <img
-                                src={post.imageUrl}
-                                alt={post.title}
-                                className="w-full h-36 object-cover hover:scale-105 transition-transform duration-300"
-                                onError={(e) => {
-                                  (e.target as HTMLImageElement).style.display = 'none';
-                                }}
-                              />
-                              {post.imageFileName && (
-                                <span className="absolute bottom-2 left-2 px-2 py-0.5 rounded-md bg-black/75 text-[10px] font-bold text-emerald-300 flex items-center gap-1 backdrop-blur-sm">
-                                  <ImageIcon className="w-3 h-3" />
-                                  <span>사진</span>
-                                </span>
-                              )}
-                            </div>
-                          ) : (post.videoData || post.videoUrl || post.videoFileName) ? (
-                              <div className="mb-3 rounded-xl overflow-hidden bg-slate-950 border border-slate-800 relative group">
-                                {(() => {
-                                  const media = parseVideoMedia(post.videoUrl, post.videoData);
-                                  if (media.thumbnailUrl) {
-                                    return (
-                                      <div className="relative w-full h-36 bg-black flex items-center justify-center overflow-hidden">
-                                        <img
-                                          src={media.thumbnailUrl}
-                                          alt={post.title}
-                                          className="w-full h-full object-cover opacity-90 group-hover:scale-105 transition-transform duration-300"
-                                        />
-                                        <div className="absolute inset-0 flex items-center justify-center bg-black/30 group-hover:bg-black/20 transition-all">
-                                          <div className="w-10 h-10 rounded-full bg-rose-600 text-white flex items-center justify-center shadow-lg group-hover:scale-110 transition-transform">
-                                            <Play className="w-5 h-5 fill-white ml-0.5" />
-                                          </div>
-                                        </div>
-                                        <span className="absolute bottom-2 left-2 px-2 py-0.5 rounded-md bg-black/75 text-[10px] font-bold text-rose-300 flex items-center gap-1">
-                                          <Film className="w-3 h-3" />
-                                          <span>{media.platformLabel || 'YouTube 영상'}</span>
-                                        </span>
-                                      </div>
-                                    );
-                                  }
-                                  if (post.videoData) {
-                                    return (
-                                      <div className="relative w-full h-36 bg-black flex items-center justify-center">
-                                        <video
-                                          src={post.videoData}
-                                          preload="metadata"
-                                          className="w-full h-36 object-cover opacity-80"
-                                        />
-                                        <div className="absolute inset-0 flex items-center justify-center bg-black/30 group-hover:bg-black/20 transition-all">
-                                          <div className="w-10 h-10 rounded-full bg-rose-500/90 text-white flex items-center justify-center shadow-lg group-hover:scale-110 transition-transform">
-                                            <Play className="w-5 h-5 fill-white ml-0.5" />
-                                          </div>
-                                        </div>
-                                        <span className="absolute bottom-2 left-2 px-2 py-0.5 rounded-md bg-black/70 text-[10px] font-bold text-emerald-300 flex items-center gap-1">
-                                          <Film className="w-3 h-3" />
-                                          <span className="truncate max-w-[140px]">{post.videoFileName || '첨부 영상'}</span>
-                                        </span>
-                                      </div>
-                                    );
-                                  }
-                                  return (
-                                    <div className="relative w-full h-36 bg-gradient-to-br from-slate-900 via-rose-950/40 to-slate-900 flex flex-col items-center justify-center p-3 text-center">
-                                      <div className="w-10 h-10 rounded-full bg-rose-500 text-white flex items-center justify-center shadow-lg group-hover:scale-110 transition-transform mb-1.5">
-                                        <Play className="w-5 h-5 fill-white ml-0.5" />
-                                      </div>
-                                      <span className="text-[11px] font-bold text-rose-200 truncate max-w-full px-2">
-                                        {post.videoFileName || media.platformLabel || '영상 미디어 재생'}
-                                      </span>
-                                    </div>
-                                  );
-                                })()}
-                              </div>
-                            ) : null}
-                            <h4 className="font-extrabold text-slate-900 text-sm md:text-base mb-1.5 line-clamp-2 leading-snug hover:text-emerald-800 transition-colors">
-                              {post.title}
-                            </h4>
-                            <p className="text-slate-500 text-xs leading-relaxed line-clamp-3 mb-4">
-                              {post.content}
-                            </p>
-                          </div>
-                        </div>
-
-                      {/* Footer Actions */}
-                      <div className="pt-3.5 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-400 font-bold">
-                        <span className="flex items-center gap-1">
-                          <Calendar className="w-3 h-3" />
-                          {post.date}
-                        </span>
-
-                        <div className="flex items-center gap-2">
-                          <span className="flex items-center gap-1">
-                            <Eye className="w-3.5 h-3.5" />
-                            {post.views}
-                          </span>
-
-                          {(post.fileUrl || post.fileData) && (
-                            <span className="p-1 rounded bg-emerald-50 text-emerald-800" title="첨부파일 있음">
-                              <FileDown className="w-3.5 h-3.5" />
-                            </span>
-                          )}
-
-                          {(post.videoUrl || post.videoData) && (
-                            <span className="p-1 rounded bg-rose-50 text-rose-700 flex items-center gap-0.5" title={post.videoData ? '직접 첨부 영상' : '영상 링크'}>
-                              <Play className="w-3.5 h-3.5 fill-rose-700" />
-                            </span>
-                          )}
-
-                          {/* Blind Toggle Button for Student Council & Admin */}
-                          {isManager && (
-                            <button
-                              onClick={(e) => handleToggleFlag(post.id, e)}
-                              className={`p-1.5 rounded-lg border transition-colors ${
-                                post.isFlagged
-                                  ? 'bg-amber-500 text-white border-amber-600'
-                                  : 'text-slate-400 border-slate-200 hover:text-amber-600 hover:bg-amber-50'
-                              }`}
-                              title={post.isFlagged ? '블라인드 해제' : '블라인드 처리'}
-                            >
-                              <Shield className="w-3.5 h-3.5" />
-                            </button>
-                          )}
-
-                          {/* Edit & Delete: ONLY for Authenticated Managers (Teachers / Student Council) */}
-                          {isManager && (
-                            <div className="flex items-center gap-1">
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  openEditPost(post);
-                                }}
-                                className="p-1.5 rounded-lg border border-slate-200 text-slate-500 hover:text-emerald-800 hover:bg-emerald-50 hover:border-emerald-300 transition-colors flex items-center gap-1 text-[11px] font-bold"
-                                title="운영진 권한: 게시물 수정"
-                              >
-                                <Pencil className="w-3.5 h-3.5" />
-                                <span className="hidden sm:inline">수정</span>
-                              </button>
-
-                              <button
-                                onClick={(e) => handleDeletePost(post.id, e)}
-                                className="p-1.5 rounded-lg border border-slate-200 text-slate-400 hover:text-rose-600 hover:bg-rose-50 hover:border-rose-300 transition-colors flex items-center gap-1 text-[11px] font-bold"
-                                title="운영진 권한: 게시물 삭제"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                                <span className="hidden sm:inline">삭제</span>
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
+                {filteredPosts.map((post) => renderPostCard(post, false))}
               </div>
             )}
           </div>
@@ -1603,9 +1872,15 @@ export function App() {
               {/* Video Player (Direct Upload / YouTube / Web Video) */}
               {(activeReaderPost.videoUrl || activeReaderPost.videoData || activeReaderPost.videoFileName) && (
                 <div className="space-y-2">
-                  <div className="text-xs font-black text-slate-700 flex items-center gap-1.5">
-                    <Film className="w-4 h-4 text-rose-500" />
-                    <span>첨부된 영상 미디어 ({activeReaderPost.videoFileName || '원곡중 스포츠 미디어'})</span>
+                  <div className="flex items-center justify-between">
+                    <div className="text-xs font-black text-slate-700 flex items-center gap-1.5">
+                      <Film className="w-4 h-4 text-rose-500" />
+                      <span>첨부 영상 미디어 ({activeReaderPost.videoFileName || '원곡 스포츠 영상'})</span>
+                    </div>
+                    <span className="text-[10px] text-emerald-700 font-bold bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full flex items-center gap-1">
+                      <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                      <span>스마트폰·PC 전체 즉시 재생</span>
+                    </span>
                   </div>
                   <VideoPlayer
                     videoUrl={activeReaderPost.videoUrl}
@@ -1745,7 +2020,7 @@ export function App() {
                       type="button"
                       onClick={() => {
                         setFormAuthor(identity.value);
-                        if (postModalMode === 'add') {
+                        if (postModalMode === 'add' && currentTab === 'home') {
                           setFormCategory(identity.category);
                         }
                       }}
@@ -1819,71 +2094,149 @@ export function App() {
                 />
               </div>
 
-              {/* Direct Video File Attachment Section */}
+              {/* Video Attachment Section: Dual-mode (Online Streaming Link & Direct File Upload) */}
               <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200 space-y-3">
                 <div className="flex items-center justify-between">
                   <label className="text-xs font-extrabold text-slate-800 flex items-center gap-1.5">
                     <Video className="w-4 h-4 text-rose-500" />
-                    <span>동영상 파일 첨부 (내 기기 직접 업로드)</span>
+                    <span>동영상 등록 (유튜브 / 쇼츠 / 구글드라이브 / 직접 첨부)</span>
                   </label>
                   <span className="text-[10px] text-rose-600 font-bold bg-rose-50 border border-rose-200 px-2 py-0.5 rounded-full">
                     선택 사항
                   </span>
                 </div>
 
-                <div className="space-y-2">
-                  <div className="border-2 border-dashed border-rose-200 bg-white rounded-xl p-3.5 text-center hover:border-rose-400 transition-colors">
-                    <Film className="w-6 h-6 text-rose-400 mx-auto mb-1" />
-                    <div className="text-xs font-black text-slate-800">
-                      {formVideoData ? '새 동영상 파일로 교체하기' : '동영상 파일 선택 또는 드래그'}
-                    </div>
-                    <p className="text-[11px] text-slate-400 mt-0.5">
-                      MP4, MOV, WebM, 숏폼/릴스 세로 영상 (최대 100MB 고화질 지원)
-                    </p>
-                    <input
-                      type="file"
-                      accept="video/*,.mp4,.mov,.webm,.m4v,.mkv,.avi"
-                      onChange={handleVideoUpload}
-                      className="mt-2 text-[11px] text-slate-600 file:mr-2 file:py-1 file:px-2.5 file:rounded-lg file:border-0 file:text-xs file:font-bold file:bg-rose-500 file:text-white file:hover:bg-rose-600 file:cursor-pointer cursor-pointer"
-                    />
-                  </div>
+                {/* Video Mode Tabs */}
+                <div className="flex gap-1.5 p-1 bg-slate-200/80 rounded-xl text-xs font-bold">
+                  <button
+                    type="button"
+                    onClick={() => setVideoInputMode('link')}
+                    className={`flex-1 py-1.5 px-2 rounded-lg transition-all flex items-center justify-center gap-1.5 ${
+                      videoInputMode === 'link'
+                        ? 'bg-white text-rose-600 shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    <Play className="w-3.5 h-3.5 fill-rose-500 text-rose-500" />
+                    <span>온라인 링크 (유튜브·쇼츠·드라이브)</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setVideoInputMode('file')}
+                    className={`flex-1 py-1.5 px-2 rounded-lg transition-all flex items-center justify-center gap-1.5 ${
+                      videoInputMode === 'file'
+                        ? 'bg-white text-emerald-800 shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    <Film className="w-3.5 h-3.5 text-emerald-700" />
+                    <span>내 기기 파일 직접 첨부 (MP4)</span>
+                  </button>
+                </div>
 
-                  {/* In-Progress Loading Indicator */}
-                  {isVideoLoading && (
-                    <div className="p-3 bg-rose-50 rounded-xl border border-rose-200 flex items-center gap-2.5 text-xs text-rose-700 font-bold animate-pulse">
-                      <Loader2 className="w-4 h-4 animate-spin text-rose-600 shrink-0" />
-                      <span>대용량 동영상 파일을 안전하게 처리 중입니다... 잠시만 기다려주세요.</span>
-                    </div>
-                  )}
-
-                  {formVideoData && (
-                    <div className="p-3 bg-white rounded-xl border border-rose-200 flex flex-col gap-2">
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-1.5 overflow-hidden">
-                          <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0 animate-pulse" />
-                          <span className="text-xs font-bold text-slate-800 truncate">
-                            첨부 완료: {formVideoFileName || '동영상 파일'}
-                            {formVideoFileSize > 0 && ` (${(formVideoFileSize / (1024 * 1024)).toFixed(1)}MB)`}
-                          </span>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={handleRemoveVideo}
-                          className="text-[11px] text-rose-500 hover:text-rose-700 font-bold flex items-center gap-1 shrink-0"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                          <span>동영상 삭제</span>
-                        </button>
+                {/* Tab 1: Online Video Link (YouTube, Shorts, Google Drive, Web MP4) */}
+                {videoInputMode === 'link' && (
+                  <div className="space-y-2">
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-[11px] font-extrabold text-slate-600">
+                          동영상 주소 (URL) 입력
+                        </span>
+                        {formVideoUrl && (
+                          <button
+                            type="button"
+                            onClick={() => setFormVideoUrl('')}
+                            className="text-[10px] text-rose-500 hover:text-rose-700 font-bold flex items-center gap-0.5"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                            <span>링크 지우기</span>
+                          </button>
+                        )}
                       </div>
-                      {/* Interactive live preview via resilient VideoPlayer */}
+                      <input
+                        type="url"
+                        placeholder="예: https://youtube.com/shorts/... 또는 https://drive.google.com/file/d/.../view"
+                        value={formVideoUrl}
+                        onChange={(e) => setFormVideoUrl(e.target.value)}
+                        className="w-full border rounded-xl px-3 py-2 text-xs font-medium text-slate-800 bg-white focus:outline-none focus:border-rose-500"
+                      />
+                    </div>
+
+                    <div className="p-2.5 bg-rose-50/70 rounded-xl border border-rose-100 text-[11px] text-slate-600 space-y-1">
+                      <p className="font-bold text-rose-800 flex items-center gap-1">
+                        <Sparkles className="w-3.5 h-3.5 text-rose-500 shrink-0" />
+                        <span>누구든 끊김 없이 고화질로 볼 수 있는 추천 방식입니다!</span>
+                      </p>
+                      <ul className="text-[10.5px] text-slate-600 space-y-0.5 list-disc list-inside">
+                        <li><strong>유튜브 / 쇼츠</strong>: 스마트폰 앱의 [공유 → 링크 복사] 주소 지원</li>
+                        <li><strong>구글 드라이브</strong>: 학교 계정 등 공유 설정 "링크가 있는 모든 사용자" 지원</li>
+                        <li><strong>웹 비디오</strong>: 직접 등록된 MP4/WebM 스트리밍 주소 지원</li>
+                      </ul>
+                    </div>
+                  </div>
+                )}
+
+                {/* Tab 2: Direct Video File Upload */}
+                {videoInputMode === 'file' && (
+                  <div className="space-y-2">
+                    <div className="border-2 border-dashed border-rose-200 bg-white rounded-xl p-3.5 text-center hover:border-rose-400 transition-colors">
+                      <Film className="w-6 h-6 text-rose-400 mx-auto mb-1" />
+                      <div className="text-xs font-black text-slate-800">
+                        {formVideoUrl || formVideoData ? '새 동영상 파일로 교체하기' : '동영상 파일 선택 또는 드래그'}
+                      </div>
+                      <p className="text-[11px] text-slate-400 mt-0.5">
+                        MP4, MOV, WebM, 숏폼 세로 영상 (모든 기기 동기화 서버 자동 업로드)
+                      </p>
+                      <input
+                        type="file"
+                        accept="video/*,.mp4,.mov,.webm,.m4v,.mkv,.avi"
+                        onChange={handleVideoUpload}
+                        className="mt-2 text-[11px] text-slate-600 file:mr-2 file:py-1 file:px-2.5 file:rounded-lg file:border-0 file:text-xs file:font-bold file:bg-rose-500 file:text-white file:hover:bg-rose-600 file:cursor-pointer cursor-pointer"
+                      />
+                    </div>
+
+                    {/* In-Progress Loading Indicator */}
+                    {isVideoLoading && (
+                      <div className="p-3 bg-rose-50 rounded-xl border border-rose-200 flex items-center gap-2.5 text-xs text-rose-700 font-bold animate-pulse">
+                        <Loader2 className="w-4 h-4 animate-spin text-rose-600 shrink-0" />
+                        <span>동영상 파일을 서버에 전송하고 모든 기기 호환 스트리밍 주소를 생성 중입니다...</span>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Live Preview If Any Video Source is Available */}
+                {(formVideoUrl || formVideoData) && (
+                  <div className="p-3 bg-white rounded-xl border border-rose-200 flex flex-col gap-2">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-1.5 overflow-hidden">
+                        <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0 animate-pulse" />
+                        <span className="text-xs font-bold text-slate-800 truncate">
+                          영상 준비 완료: {formVideoFileName || formVideoUrl || '동영상 미디어'}
+                          {formVideoFileSize > 0 && ` (${(formVideoFileSize / (1024 * 1024)).toFixed(1)}MB)`}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleRemoveVideo}
+                        className="text-[11px] text-rose-500 hover:text-rose-700 font-bold flex items-center gap-1 shrink-0"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>삭제</span>
+                      </button>
+                    </div>
+
+                    {/* Interactive live preview via resilient VideoPlayer */}
+                    <div className="border border-slate-200 rounded-xl overflow-hidden bg-black">
                       <VideoPlayer
+                        videoUrl={formVideoUrl}
                         videoData={formVideoData}
                         videoFileName={formVideoFileName}
                         compact
                       />
                     </div>
-                  )}
-                </div>
+                  </div>
+                )}
               </div>
 
               {/* Photo & Document Uploads */}
