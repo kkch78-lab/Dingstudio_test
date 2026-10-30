@@ -21,6 +21,7 @@ import {
   Pencil,
   Phone,
   Play,
+  RefreshCw,
   Search,
   Shield,
   Sparkles,
@@ -42,6 +43,69 @@ import { INITIAL_POSTS, INITIAL_RENTALS, INITIAL_MATCHES, INITIAL_ANNOUNCEMENTS 
 import { collection, doc, onSnapshot, setDoc, deleteDoc, updateDoc } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from './firebase';
 
+// Category normalizer to prevent posts from vanishing due to whitespace or label variations
+export const normalizeCategory = (cat?: string): string => {
+  if (!cat) return '자유';
+  const c = cat.trim();
+  if (c.includes('릴스') || c.includes('쇼츠') || c.includes('숏폼') || c.includes('오아시스')) return '내가 바로 원곡 릴스꾼';
+  if (c.includes('체육대회') || c.includes('지원단') || c.includes('페스티벌')) return '체육대회';
+  if (c.includes('심판') || c.includes('기자')) return '학생심판지원단(기자단)';
+  if (c.includes('스포츠클럽') || c.includes('클럽') || c.includes('리그')) return '스포츠클럽';
+  return '자유';
+};
+
+// Deep post comparison to eliminate unnecessary re-renders & flickering
+export const arePostsEqual = (a: Post[], b: Post[]): boolean => {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const pa = a[i];
+    const pb = b[i];
+    if (
+      pa.id !== pb.id ||
+      pa.title !== pb.title ||
+      pa.views !== pb.views ||
+      pa.category !== pb.category ||
+      pa.imageUrl !== pb.imageUrl ||
+      pa.videoUrl !== pb.videoUrl ||
+      pa.videoFileName !== pb.videoFileName ||
+      pa.isFlagged !== pb.isFlagged
+    ) {
+      return false;
+    }
+  }
+  return true;
+};
+
+// Authoritative idempotent post merge
+export const mergePostLists = (base: Post[], incoming: Post[]): Post[] => {
+  const map = new Map<string, Post>();
+  for (const p of base) {
+    if (p && p.id) map.set(p.id, p);
+  }
+  for (const inc of incoming) {
+    if (inc && inc.id) {
+      const existing = map.get(inc.id);
+      if (existing) {
+        map.set(inc.id, {
+          ...existing,
+          ...inc,
+          imageUrl: inc.imageUrl || existing.imageUrl,
+          imageFileName: inc.imageFileName || existing.imageFileName,
+          videoUrl: inc.videoUrl || existing.videoUrl,
+          videoFileName: inc.videoFileName || existing.videoFileName,
+          videoData: inc.videoData || existing.videoData,
+          views: Math.max(existing.views || 0, inc.views || 0)
+        });
+      } else {
+        map.set(inc.id, inc);
+      }
+    }
+  }
+  const result = Array.from(map.values());
+  result.sort((a, b) => (b.date || '').localeCompare(a.date || '') || b.id.localeCompare(a.id));
+  return result;
+};
+
 export function App() {
   // Navigation & Role State
   const [currentTab, setCurrentTab] = useState<string>('home');
@@ -53,82 +117,47 @@ export function App() {
     }
   });
 
+  // Cross-device sync & sub-board view control states
+  const [isSyncing, setIsSyncing] = useState<boolean>(false);
+  const [lastSyncTime, setLastSyncTime] = useState<string>('방금 전');
+  const [subBoardShowAll, setSubBoardShowAll] = useState<boolean>(false);
+
   // Data State with Safe LocalStorage Fallback & INITIAL_POSTS Media Upgrade
   const [posts, setPosts] = useState<Post[]>(() => {
     try {
       const savedStr = localStorage.getItem('wongok_posts');
       if (!savedStr) return INITIAL_POSTS;
       const saved: Post[] = JSON.parse(savedStr);
-      // Ensure initial posts get updated images/videos even if previously cached without them
-      const initialMap = new Map<string, Post>(INITIAL_POSTS.map((p) => [p.id, p]));
-      const merged = saved.map((p) => {
-        const init = initialMap.get(p.id);
-        if (init) {
-          return {
-            ...p,
-            category: p.category === '학생체육지원단' ? '체육대회' : p.category,
-            imageUrl: p.imageUrl || init.imageUrl,
-            imageFileName: p.imageFileName || init.imageFileName,
-            videoUrl: p.videoUrl || init.videoUrl,
-            videoData: p.videoData || init.videoData,
-            videoFileName: p.videoFileName || init.videoFileName,
-            videoSourceType: p.videoSourceType || init.videoSourceType
-          };
-        }
-        return p;
-      });
-      // Add any missing initial posts
-      for (const init of INITIAL_POSTS) {
-        if (!merged.some((p) => p.id === init.id)) {
-          merged.push(init);
-        }
-      }
-      return merged;
+      return mergePostLists(INITIAL_POSTS, saved);
     } catch {
       return INITIAL_POSTS;
     }
   });
 
-  // 🚀 1. Real-time Background Sync from Server (/api/posts) - Synchronizes instantly across PC, Mobile, and all visitors
+  // 🚀 1. Real-time Background Sync from Server (/api/posts & /api/sync-posts)
   useEffect(() => {
     let isMounted = true;
-    const fetchServerPosts = async () => {
+
+    // Initial bidirectional sync to upload local device posts and pull any missing server posts
+    const syncLocalWithServer = async () => {
       try {
-        const res = await fetch('/api/posts');
-        if (res.ok) {
+        const savedStr = localStorage.getItem('wongok_posts');
+        const localList = savedStr ? JSON.parse(savedStr) : [];
+        const syncPayload = Array.isArray(localList) && localList.length > 0 ? localList : INITIAL_POSTS;
+
+        const res = await fetch('/api/sync-posts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ posts: syncPayload })
+        });
+        if (res.ok && isMounted) {
           const data = await res.json();
           if (data.success && Array.isArray(data.posts) && data.posts.length > 0) {
-            if (!isMounted) return;
-            setPosts((prevPosts) => {
-              const prevMap = new Map<string, Post>(prevPosts.map((p) => [p.id, p]));
-              const merged: Post[] = [];
-
-              for (const sPost of data.posts as Post[]) {
-                const existing = prevMap.get(sPost.id);
-                if (existing) {
-                  merged.push({
-                    ...sPost,
-                    imageUrl: sPost.imageUrl || existing.imageUrl,
-                    imageFileName: sPost.imageFileName || existing.imageFileName,
-                    videoUrl: sPost.videoUrl || existing.videoUrl,
-                    videoData: sPost.videoData || existing.videoData,
-                    videoFileName: sPost.videoFileName || existing.videoFileName,
-                    views: Math.max(existing.views || 0, sPost.views || 0)
-                  });
-                  prevMap.delete(sPost.id);
-                } else {
-                  merged.push(sPost);
-                }
-              }
-
-              // Keep any posts created locally that might not be on server yet
-              for (const remaining of prevMap.values()) {
-                merged.push(remaining);
-              }
-
-              merged.sort((a, b) => (b.date || '').localeCompare(a.date || '') || b.id.localeCompare(a.id));
-              return merged;
+            setPosts((prev) => {
+              const merged = mergePostLists(prev, data.posts);
+              return arePostsEqual(prev, merged) ? prev : merged;
             });
+            setLastSyncTime(new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' }));
           }
         }
       } catch {
@@ -136,8 +165,27 @@ export function App() {
       }
     };
 
-    fetchServerPosts();
-    const interval = setInterval(fetchServerPosts, 3500);
+    syncLocalWithServer();
+
+    // Periodic polling from server (anti-flicker: only updates state if data changed)
+    const fetchServerPosts = async () => {
+      try {
+        const res = await fetch('/api/posts');
+        if (res.ok && isMounted) {
+          const data = await res.json();
+          if (data.success && Array.isArray(data.posts) && data.posts.length > 0) {
+            setPosts((prev) => {
+              const merged = mergePostLists(prev, data.posts);
+              return arePostsEqual(prev, merged) ? prev : merged;
+            });
+          }
+        }
+      } catch {
+        // Silent fallback
+      }
+    };
+
+    const interval = setInterval(fetchServerPosts, 4000);
 
     return () => {
       isMounted = false;
@@ -161,31 +209,10 @@ export function App() {
               remotePosts.push({ ...data, id: docSnap.id });
             });
             setPosts((prevPosts) => {
-              const prevMap = new Map<string, Post>(prevPosts.map((p) => [p.id, p]));
-              const merged: Post[] = [];
-              for (const rPost of remotePosts) {
-                const existing = prevMap.get(rPost.id);
-                if (existing) {
-                  merged.push({
-                    ...rPost,
-                    imageUrl: rPost.imageUrl || existing.imageUrl,
-                    imageFileName: rPost.imageFileName || existing.imageFileName,
-                    videoUrl: rPost.videoUrl || existing.videoUrl,
-                    videoData: rPost.videoData || existing.videoData,
-                    videoFileName: rPost.videoFileName || existing.videoFileName,
-                    views: Math.max(existing.views || 0, rPost.views || 0)
-                  });
-                  prevMap.delete(rPost.id);
-                } else {
-                  merged.push(rPost);
-                }
-              }
-              for (const remaining of prevMap.values()) {
-                merged.push(remaining);
-              }
-              merged.sort((a, b) => (b.date || '').localeCompare(a.date || '') || b.id.localeCompare(a.id));
-              return merged;
+              const merged = mergePostLists(prevPosts, remotePosts);
+              return arePostsEqual(prevPosts, merged) ? prevPosts : merged;
             });
+            setLastSyncTime(new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' }));
           }
         },
         (error) => {
@@ -329,36 +356,48 @@ export function App() {
     return () => clearInterval(timer);
   }, []);
 
-  // Hydrate videos and images from IndexedDB safely without clobbering incoming server posts
+  // Hydrate stored media from IndexedDB once safely without recursive re-render loop
   useEffect(() => {
+    let isCancelled = false;
     const hydrateMedia = async () => {
       try {
-        setPosts((currentPosts) => {
-          currentPosts.forEach(async (p) => {
-            if ((p.hasStoredVideo || !p.videoData) && (p.videoFileName || p.videoSourceType === 'file')) {
-              const cachedVideo = await loadVideoMedia(p.id);
-              if (cachedVideo) {
-                setPosts((prev) =>
-                  prev.map((item) => (item.id === p.id && !item.videoData ? { ...item, videoData: cachedVideo } : item))
-                );
-              }
+        const postsToHydrate = posts.filter(
+          (p) => (!p.videoData && p.hasStoredVideo) || (!p.imageUrl && p.hasStoredImage)
+        );
+        if (postsToHydrate.length === 0) return;
+
+        const updates = new Map<string, Partial<Post>>();
+        for (const p of postsToHydrate) {
+          if (!p.videoData && p.hasStoredVideo) {
+            const cachedVideo = await loadVideoMedia(p.id);
+            if (cachedVideo) {
+              updates.set(p.id, { ...(updates.get(p.id) || {}), videoData: cachedVideo });
             }
-            if ((p.hasStoredImage || !p.imageUrl) && (p.imageFileName || p.hasStoredImage)) {
-              const cachedImg = await loadVideoMedia('img_' + p.id);
-              if (cachedImg) {
-                setPosts((prev) =>
-                  prev.map((item) => (item.id === p.id && !item.imageUrl ? { ...item, imageUrl: cachedImg } : item))
-                );
-              }
+          }
+          if (!p.imageUrl && p.hasStoredImage) {
+            const cachedImg = await loadVideoMedia('img_' + p.id);
+            if (cachedImg) {
+              updates.set(p.id, { ...(updates.get(p.id) || {}), imageUrl: cachedImg });
             }
-          });
-          return currentPosts;
-        });
+          }
+        }
+
+        if (!isCancelled && updates.size > 0) {
+          setPosts((prev) =>
+            prev.map((item) => {
+              const u = updates.get(item.id);
+              return u ? { ...item, ...u } : item;
+            })
+          );
+        }
       } catch {
         // Silently fallback
       }
     };
     hydrateMedia();
+    return () => {
+      isCancelled = true;
+    };
   }, []);
 
   // Hydrate video or image when activeReaderPost opens
@@ -400,21 +439,37 @@ export function App() {
     }
   }, [activeVideoModalPost?.id]);
 
-  // Filtered posts based on active tab and search query
+  // Filtered posts based on active tab and search query (resilient category matching)
   const filteredPosts = useMemo(() => {
     let result = posts;
 
-    if (currentTab !== 'home') {
+    if (currentTab !== 'home' && !subBoardShowAll) {
       if (currentTab === 'class') {
-        result = result.filter((p) => p.category === '자유');
+        result = result.filter((p) => {
+          const norm = normalizeCategory(p.category);
+          return norm === '자유' || p.category === '자유';
+        });
       } else if (currentTab === 'club') {
-        result = result.filter((p) => p.category === '스포츠클럽');
+        result = result.filter((p) => {
+          const norm = normalizeCategory(p.category);
+          return norm === '스포츠클럽' || (p.category && p.category.includes('클럽'));
+        });
       } else if (currentTab === 'festival') {
-        result = result.filter((p) => p.category === '체육대회' || p.category === '학생체육지원단');
+        result = result.filter((p) => {
+          const norm = normalizeCategory(p.category);
+          return norm === '체육대회' || (p.category && (p.category.includes('체육') || p.category.includes('지원단')));
+        });
       } else if (currentTab === 'oasis') {
-        result = result.filter((p) => p.category === '내가 바로 원곡 릴스꾼');
+        result = result.filter((p) => {
+          const norm = normalizeCategory(p.category);
+          // In Reels tab: Always show any post with video OR reels category
+          return norm === '내가 바로 원곡 릴스꾼' || Boolean(p.videoUrl || p.videoData || p.videoFileName);
+        });
       } else if (currentTab === 'referee') {
-        result = result.filter((p) => p.category === '학생심판지원단(기자단)' || p.category === '학생심판지원단');
+        result = result.filter((p) => {
+          const norm = normalizeCategory(p.category);
+          return norm === '학생심판지원단(기자단)' || (p.category && (p.category.includes('심판') || p.category.includes('기자')));
+        });
       }
     }
 
@@ -429,29 +484,54 @@ export function App() {
     }
 
     return result;
-  }, [posts, currentTab, searchQuery]);
+  }, [posts, currentTab, searchQuery, subBoardShowAll]);
 
   // Filtered posts for the Home Tab
   const homePosts = useMemo(() => {
     let result = posts;
     if (homeFilter !== 'all') {
-      if (homeFilter === '자유') {
-        result = result.filter((p) => p.category === '자유');
-      } else if (homeFilter === '스포츠클럽') {
-        result = result.filter((p) => p.category === '스포츠클럽');
-      } else if (homeFilter === '체육대회') {
-        result = result.filter((p) => p.category === '체육대회' || p.category === '학생체육지원단');
-      } else if (homeFilter === '내가 바로 원곡 릴스꾼') {
-        result = result.filter((p) => p.category === '내가 바로 원곡 릴스꾼');
-      } else if (homeFilter === '학생심판지원단(기자단)') {
-        result = result.filter((p) => p.category === '학생심판지원단(기자단)' || p.category === '학생심판지원단');
-      }
+      result = result.filter((p) => {
+        const norm = normalizeCategory(p.category);
+        if (homeFilter === '자유') return norm === '자유';
+        if (homeFilter === '스포츠클럽') return norm === '스포츠클럽';
+        if (homeFilter === '체육대회') return norm === '체육대회';
+        if (homeFilter === '내가 바로 원곡 릴스꾼') {
+          return norm === '내가 바로 원곡 릴스꾼' || Boolean(p.videoUrl || p.videoData || p.videoFileName);
+        }
+        if (homeFilter === '학생심판지원단(기자단)') return norm === '학생심판지원단(기자단)';
+        return true;
+      });
     }
     return result;
   }, [posts, homeFilter]);
 
   // Auth Handler
   const isManager = userRole === 'admin' || userRole === 'student_council';
+
+  // Manual Sync Across Devices (PC, Smartphone, Tablet)
+  const handleManualSync = async () => {
+    setIsSyncing(true);
+    try {
+      const res = await fetch('/api/sync-posts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ posts })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && Array.isArray(data.posts)) {
+          setPosts((prev) => mergePostLists(prev, data.posts));
+          const timeStr = new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+          setLastSyncTime(timeStr);
+          showToast(`✅ PC·스마트폰 실시간 동기화 완료! (총 ${data.posts.length}개 게시물)`, 'success');
+        }
+      }
+    } catch {
+      showToast('네트워크 상태를 확인해주세요.', 'error');
+    } finally {
+      setIsSyncing(false);
+    }
+  };
 
   const handleAuthSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -619,6 +699,11 @@ export function App() {
     }
 
     // 1. Instant Optimistic UI Update (Immediate display, zero draft, zero delay)
+    const cleanNetworkPayload = { ...payload };
+    if (cleanNetworkPayload.videoUrl) {
+      delete cleanNetworkPayload.videoData;
+    }
+
     if (postModalMode === 'edit' && editingPostId) {
       setPosts((prevPosts) =>
         prevPosts.map((p) => (p.id === editingPostId ? { ...p, ...payload } : p))
@@ -631,13 +716,13 @@ export function App() {
       fetch(`/api/posts/${editingPostId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(cleanNetworkPayload)
       }).catch(() => {});
       // 🚀 Save to Firebase Firestore (Instant PC ↔ Mobile sync)
       const firestoreDoc: Record<string, any> = {};
       Object.entries(payload).forEach(([k, v]) => {
         if (v !== undefined) {
-          if (k === 'videoData' && typeof v === 'string' && v.length > 750000) {
+          if (k === 'videoData' && typeof v === 'string' && v.length > 500000) {
             firestoreDoc[k] = '';
           } else {
             firestoreDoc[k] = v;
@@ -654,13 +739,20 @@ export function App() {
       fetch('/api/posts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(cleanNetworkPayload)
+      }).then(async (res) => {
+        if (res.ok) {
+          const resData = await res.json();
+          if (resData.success && resData.post) {
+            setPosts((prev) => mergePostLists(prev, [resData.post]));
+          }
+        }
       }).catch(() => {});
       // 🚀 Save to Firebase Firestore (Instant PC ↔ Mobile sync)
       const firestoreDoc: Record<string, any> = {};
       Object.entries(payload).forEach(([k, v]) => {
         if (v !== undefined) {
-          if (k === 'videoData' && typeof v === 'string' && v.length > 750000) {
+          if (k === 'videoData' && typeof v === 'string' && v.length > 500000) {
             firestoreDoc[k] = '';
           } else {
             firestoreDoc[k] = v;
@@ -1335,6 +1427,19 @@ export function App() {
 
           {/* Right Action Buttons */}
           <div className="flex items-center gap-2 shrink-0">
+            {/* Live Cross-Device Sync Button */}
+            <button
+              id="btn-manual-sync"
+              onClick={handleManualSync}
+              disabled={isSyncing}
+              className="bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 text-xs font-bold px-3 py-2 rounded-xl flex items-center gap-1.5 transition-all shadow-xs"
+              title="PC·스마트폰 실시간 게시물 동기화 및 새로고침"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 text-emerald-600 ${isSyncing ? 'animate-spin' : ''}`} />
+              <span className="hidden sm:inline">{isSyncing ? '동기화 중...' : '실시간 동기화'}</span>
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse hidden sm:inline" />
+            </button>
+
             <button
               id="role-switch-trigger-btn"
               onClick={() => setIsAuthModalOpen(true)}
@@ -1403,6 +1508,16 @@ export function App() {
               </button>
             );
           })}
+          {/* Mobile Instant Sync Button */}
+          <button
+            onClick={handleManualSync}
+            disabled={isSyncing}
+            className="px-2.5 py-1.5 rounded-lg text-xs font-extrabold flex items-center gap-1 shrink-0 bg-emerald-50 text-emerald-800 border border-emerald-300 shadow-xs"
+            title="스마트폰 실시간 동기화"
+          >
+            <RefreshCw className={`w-3 h-3 text-emerald-600 ${isSyncing ? 'animate-spin' : ''}`} />
+            <span>동기화</span>
+          </button>
         </div>
       </nav>
 
@@ -1725,6 +1840,16 @@ export function App() {
 
                 <div className="flex items-center gap-2 shrink-0">
                   <button
+                    onClick={handleManualSync}
+                    disabled={isSyncing}
+                    className="bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 text-xs font-bold px-3 py-2.5 rounded-xl flex items-center gap-1.5 transition-all shadow-xs"
+                    title="PC·스마트폰 실시간 게시물 동기화 및 새로고침"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 text-emerald-600 ${isSyncing ? 'animate-spin' : ''}`} />
+                    <span className="hidden sm:inline">{isSyncing ? '동기화 중...' : '실시간 새로고침'}</span>
+                  </button>
+
+                  <button
                     onClick={() => openAddPost()}
                     className="bg-[#ff1e56] hover:bg-[#e01448] text-white font-extrabold text-xs px-4 py-2.5 rounded-xl flex items-center gap-1.5 transition-all shadow-md shadow-rose-200"
                   >
@@ -1826,18 +1951,33 @@ export function App() {
 
             {/* Search & Filter Bar */}
             <div className="flex flex-col sm:flex-row items-center justify-between gap-3 bg-white p-3 rounded-2xl border border-slate-200 shadow-sm">
-              <div className="relative w-full sm:w-80">
-                <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-                <input
-                  type="text"
-                  placeholder="제목, 내용, 작성자로 검색..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  className="w-full pl-9 pr-4 py-2 text-xs font-semibold rounded-xl bg-slate-50 border border-slate-200 focus:outline-none focus:border-emerald-600 text-slate-800"
-                />
+              <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto flex-1">
+                <div className="relative w-full sm:w-80">
+                  <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    placeholder="제목, 내용, 작성자로 검색..."
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    className="w-full pl-9 pr-4 py-2 text-xs font-semibold rounded-xl bg-slate-50 border border-slate-200 focus:outline-none focus:border-emerald-600 text-slate-800"
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setSubBoardShowAll(!subBoardShowAll)}
+                  className={`px-3 py-2 rounded-xl text-xs font-bold transition-all border shrink-0 flex items-center gap-1.5 ${
+                    subBoardShowAll
+                      ? 'bg-emerald-800 text-white border-emerald-800 shadow-xs'
+                      : 'bg-slate-100 text-slate-600 border-slate-200 hover:bg-slate-200'
+                  }`}
+                  title="이 마당 게시물만 보기 / 전체 게시물 함께 보기 전환"
+                >
+                  <Eye className="w-3.5 h-3.5" />
+                  <span>{subBoardShowAll ? '🌐 원곡 전체 게시물 함께 보기 ON' : '📌 이 마당 게시물만 보기'}</span>
+                </button>
               </div>
-              <div className="text-xs text-slate-500 font-bold self-end sm:self-center">
-                검색 결과: <span className="text-emerald-800 font-black">{filteredPosts.length}</span>건
+              <div className="text-xs text-slate-500 font-bold self-end sm:self-center shrink-0">
+                게시물: <span className="text-emerald-800 font-black">{filteredPosts.length}</span>건
               </div>
             </div>
 

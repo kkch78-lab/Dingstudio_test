@@ -9,26 +9,90 @@ const __dirname = path.dirname(__filename);
 
 const DATA_FILE = path.join(__dirname, 'server-posts.json');
 
+let memoryPosts: any[] = [];
+
 // Read posts from disk or default
-function getStoredPosts() {
+function getStoredPosts(): any[] {
   try {
     if (fs.existsSync(DATA_FILE)) {
       const content = fs.readFileSync(DATA_FILE, 'utf-8');
-      return JSON.parse(content);
+      const parsed = JSON.parse(content);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed;
+      }
     }
   } catch (err) {
     console.error('Error reading server-posts.json:', err);
   }
-  return null;
+  return [];
 }
 
-// Write posts to disk
+// Write posts to disk safely
 function saveStoredPosts(posts: any[]) {
   try {
-    fs.writeFileSync(DATA_FILE, JSON.stringify(posts, null, 2), 'utf-8');
+    const tmpFile = `${DATA_FILE}.tmp`;
+    fs.writeFileSync(tmpFile, JSON.stringify(posts, null, 2), 'utf-8');
+    fs.renameSync(tmpFile, DATA_FILE);
   } catch (err) {
-    console.error('Error saving server-posts.json:', err);
+    try {
+      fs.writeFileSync(DATA_FILE, JSON.stringify(posts, null, 2), 'utf-8');
+    } catch (e) {
+      console.error('Error saving server-posts.json:', e);
+    }
   }
+}
+
+// Helper to sanitize posts and convert large data URLs to permanent disk files
+function sanitizePost(post: any, videosDir: string, imagesDir: string): any {
+  if (!post || typeof post !== 'object') return post;
+  const p = { ...post };
+
+  // 1. If videoData is data: URL, convert to file in public/videos
+  if (p.videoData && typeof p.videoData === 'string' && p.videoData.startsWith('data:video/')) {
+    try {
+      const match = p.videoData.match(/^data:([^;]+);base64,(.+)$/);
+      if (match) {
+        const mime = match[1];
+        const base64 = match[2];
+        const buffer = Buffer.from(base64, 'base64');
+        const ext = mime.includes('mp4') ? '.mp4' : mime.includes('webm') ? '.webm' : mime.includes('quicktime') ? '.mov' : '.mp4';
+        const cleanName = (p.videoFileName || 'video').replace(/[^a-zA-Z0-9_-]/g, '_');
+        const filename = `wongok_v_${Date.now()}_${cleanName}${ext}`;
+        const filePath = path.join(videosDir, filename);
+        fs.writeFileSync(filePath, buffer);
+        p.videoUrl = `/videos/${filename}`;
+        p.videoFileName = filename;
+      }
+    } catch (e) {
+      console.warn('Could not extract videoData to file:', e);
+    }
+    delete p.videoData;
+  } else if (p.videoUrl) {
+    delete p.videoData;
+  }
+
+  // 2. If imageUrl is data: URL, convert to file in public/images
+  if (p.imageUrl && typeof p.imageUrl === 'string' && p.imageUrl.startsWith('data:image/')) {
+    try {
+      const match = p.imageUrl.match(/^data:([^;]+);base64,(.+)$/);
+      if (match) {
+        const mime = match[1];
+        const base64 = match[2];
+        const buffer = Buffer.from(base64, 'base64');
+        const ext = mime.includes('png') ? '.png' : mime.includes('webp') ? '.webp' : '.jpg';
+        const cleanName = (p.imageFileName || 'image').replace(/[^a-zA-Z0-9_-]/g, '_');
+        const filename = `wongok_img_${Date.now()}_${cleanName}${ext}`;
+        const filePath = path.join(imagesDir, filename);
+        fs.writeFileSync(filePath, buffer);
+        p.imageUrl = `/images/${filename}`;
+        p.imageFileName = filename;
+      }
+    } catch (e) {
+      console.warn('Could not extract imageUrl to file:', e);
+    }
+  }
+
+  return p;
 }
 
 async function startServer() {
@@ -275,10 +339,55 @@ async function startServer() {
     }
   });
 
+  // Initialize in-memory post storage
+  memoryPosts = getStoredPosts();
+
   // API Routes
   app.get('/api/posts', (_req, res) => {
-    const posts = getStoredPosts() || [];
-    res.json({ success: true, posts });
+    if (!memoryPosts || memoryPosts.length === 0) {
+      memoryPosts = getStoredPosts();
+    }
+    res.json({ success: true, posts: memoryPosts });
+  });
+
+  // Batch Post Synchronization Route (Enables PC & Mobile to merge local and server state reliably)
+  app.post('/api/sync-posts', (req, res) => {
+    try {
+      const incoming = req.body?.posts;
+      if (Array.isArray(incoming) && incoming.length > 0) {
+        const postMap = new Map<string, any>();
+        // First add existing memory posts
+        for (const p of memoryPosts) {
+          postMap.set(p.id, p);
+        }
+        // Then merge incoming posts
+        for (const inc of incoming) {
+          if (inc && inc.id) {
+            const sanitized = sanitizePost(inc, videosDir, imagesDir);
+            const current = postMap.get(inc.id);
+            if (current) {
+              postMap.set(inc.id, {
+                ...current,
+                ...sanitized,
+                imageUrl: sanitized.imageUrl || current.imageUrl,
+                videoUrl: sanitized.videoUrl || current.videoUrl,
+                views: Math.max(current.views || 0, sanitized.views || 0)
+              });
+            } else {
+              postMap.set(inc.id, sanitized);
+            }
+          }
+        }
+        memoryPosts = Array.from(postMap.values()).sort(
+          (a, b) => (b.date || '').localeCompare(a.date || '') || b.id.localeCompare(a.id)
+        );
+        saveStoredPosts(memoryPosts);
+      }
+      res.json({ success: true, posts: memoryPosts });
+    } catch (err: any) {
+      console.error('Error syncing posts:', err);
+      res.status(500).json({ success: false, message: err.message, posts: memoryPosts });
+    }
   });
 
   app.post('/api/posts', (req, res) => {
@@ -288,11 +397,12 @@ async function startServer() {
         res.status(400).json({ success: false, message: 'Invalid post data' });
         return;
       }
-      const existing = getStoredPosts() || [];
-      const updated = [newPost, ...existing.filter((p: any) => p.id !== newPost.id)];
-      saveStoredPosts(updated);
-      res.json({ success: true, post: newPost });
+      const sanitized = sanitizePost(newPost, videosDir, imagesDir);
+      memoryPosts = [sanitized, ...memoryPosts.filter((p: any) => p.id !== sanitized.id)];
+      saveStoredPosts(memoryPosts);
+      res.json({ success: true, post: sanitized, totalCount: memoryPosts.length });
     } catch (err: any) {
+      console.error('Error adding post:', err);
       res.status(500).json({ success: false, message: err.message });
     }
   });
@@ -301,9 +411,9 @@ async function startServer() {
     try {
       const { id } = req.params;
       const updatedData = req.body;
-      const existing = getStoredPosts() || [];
-      const updated = existing.map((p: any) => (p.id === id ? { ...p, ...updatedData } : p));
-      saveStoredPosts(updated);
+      const sanitized = sanitizePost(updatedData, videosDir, imagesDir);
+      memoryPosts = memoryPosts.map((p: any) => (p.id === id ? { ...p, ...sanitized } : p));
+      saveStoredPosts(memoryPosts);
       res.json({ success: true });
     } catch (err: any) {
       res.status(500).json({ success: false, message: err.message });
@@ -313,9 +423,8 @@ async function startServer() {
   app.delete('/api/posts/:id', (req, res) => {
     try {
       const { id } = req.params;
-      const existing = getStoredPosts() || [];
-      const updated = existing.filter((p: any) => p.id !== id);
-      saveStoredPosts(updated);
+      memoryPosts = memoryPosts.filter((p: any) => p.id !== id);
+      saveStoredPosts(memoryPosts);
       res.json({ success: true });
     } catch (err: any) {
       res.status(500).json({ success: false, message: err.message });
