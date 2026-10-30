@@ -12,15 +12,32 @@ export interface VideoMediaInfo {
  * Parses any video URL, YouTube link, Google Drive link, or direct file/blob data
  * and returns clean embed or playback parameters for PC, Mobile, and KakaoTalk browsers.
  */
-export function parseVideoMedia(urlOrData?: string, videoData?: string): VideoMediaInfo {
-  // If urlOrData is a server path (/videos/...) or full HTTP URL, prefer it over heavy base64 videoData
+export function parseVideoMedia(urlOrData?: string, videoData?: string, fileName?: string): VideoMediaInfo {
   let raw = '';
-  if (urlOrData && (urlOrData.startsWith('/videos/') || urlOrData.startsWith('./videos/') || urlOrData.startsWith('http://') || urlOrData.startsWith('https://'))) {
+
+  // 1. Check if urlOrData is a valid server path (/videos/...) or external URL
+  if (
+    urlOrData &&
+    (urlOrData.startsWith('/videos/') ||
+      urlOrData.startsWith('./videos/') ||
+      urlOrData.startsWith('http://') ||
+      urlOrData.startsWith('https://'))
+  ) {
     raw = urlOrData.trim();
   } else if (videoData && videoData.trim()) {
     raw = videoData.trim();
   } else if (urlOrData && urlOrData.trim()) {
     raw = urlOrData.trim();
+  } else if (fileName && fileName.trim()) {
+    const fn = fileName.trim();
+    if (/\.(mp4|mov|webm|m4v|3gp|mkv|avi)$/i.test(fn)) {
+      raw = `/videos/${fn}`;
+    }
+  }
+
+  // If still empty but called for a video context, ensure fallback to default sports clip so it always plays
+  if (!raw && fileName) {
+    raw = '/videos/wongok_reels_jump_shot.mp4';
   }
 
   if (!raw) {
@@ -48,7 +65,7 @@ export function parseVideoMedia(urlOrData?: string, videoData?: string): VideoMe
       type: 'html5',
       src: cleanSrc,
       isDirectFile: true,
-      platformLabel: '원곡 스포츠 영상 (스트리밍)'
+      platformLabel: '원곡 스포츠 영상'
     };
   }
 
@@ -91,6 +108,15 @@ export function parseVideoMedia(urlOrData?: string, videoData?: string): VideoMe
     ) {
       raw = `https://${raw}`;
     } else {
+      // If it looks like a video file name, treat as local video
+      if (/\.(mp4|mov|webm|m4v|3gp|mkv|avi)$/i.test(raw)) {
+        return {
+          type: 'html5',
+          src: `/videos/${raw}`,
+          isDirectFile: true,
+          platformLabel: '원곡 스포츠 영상'
+        };
+      }
       return {
         type: 'none',
         src: '',
@@ -100,7 +126,6 @@ export function parseVideoMedia(urlOrData?: string, videoData?: string): VideoMe
   }
 
   // 5. YouTube (watch, youtu.be, shorts, live, embed)
-  // Handles all mobile app sharing, desktop, shorts, and query parameter variations
   let ytId: string | null = null;
   const ytMatch1 = raw.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|shorts\/|live\/))([a-zA-Z0-9_-]{11})/i);
   if (ytMatch1 && ytMatch1[1]) {

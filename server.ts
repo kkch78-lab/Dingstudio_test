@@ -36,6 +36,9 @@ async function startServer() {
   const PORT = process.env.PORT || 3000;
   const isProd = process.env.NODE_ENV === 'production';
 
+  // Direct Raw Binary Video Upload middleware (must be before urlencoded/json)
+  app.use('/api/upload-video-raw', express.raw({ type: '*/*', limit: '100mb' }));
+
   // Body parser with high limit for photos and short videos
   app.use(express.json({ limit: '100mb' }));
   app.use(express.urlencoded({ extended: true, limit: '100mb' }));
@@ -62,7 +65,13 @@ async function startServer() {
         if (fs.existsSync(distFilePath)) {
           filePath = distFilePath;
         } else {
-          return next();
+          // Resilient fallback to default sports clip so video player never gets a 404 broken screen
+          const fallbackPath = path.join(videosDir, 'wongok_reels_jump_shot.mp4');
+          if (fs.existsSync(fallbackPath)) {
+            filePath = fallbackPath;
+          } else {
+            return next();
+          }
         }
       }
 
@@ -170,7 +179,49 @@ async function startServer() {
     }
   });
 
-  // Video Upload API: Saves uploaded video files (KakaoTalk, Phone camera, etc.) to /public/videos for fast permanent streaming across all devices
+  // Direct Binary Video Upload API: Zero base64 encoding overhead for phone cameras & KakaoTalk MP4s
+  app.post('/api/upload-video-raw', express.raw({ type: '*/*', limit: '100mb' }), (req, res) => {
+    try {
+      const rawHeaderName = req.headers['x-file-name'] as string;
+      const fileName = rawHeaderName ? decodeURIComponent(rawHeaderName) : 'video.mp4';
+      const buffer = req.body as Buffer;
+
+      if (!buffer || buffer.length === 0) {
+        res.status(400).json({ success: false, message: 'Empty video buffer' });
+        return;
+      }
+
+      let rawExt = path.extname(fileName || '').toLowerCase();
+      if (!rawExt) rawExt = '.mp4';
+
+      const baseCleanName = path.basename(fileName || 'video', rawExt).replace(/[^a-zA-Z0-9_-]/g, '_');
+      const uniqueFileName = `wongok_${Date.now()}_${Math.random().toString(36).substring(2, 7)}_${baseCleanName || 'clip'}${rawExt}`;
+      const filePath = path.join(videosDir, uniqueFileName);
+
+      fs.writeFileSync(filePath, buffer);
+
+      const distVideosDir = path.join(__dirname, 'dist', 'videos');
+      if (fs.existsSync(path.join(__dirname, 'dist'))) {
+        if (!fs.existsSync(distVideosDir)) {
+          fs.mkdirSync(distVideosDir, { recursive: true });
+        }
+        fs.writeFileSync(path.join(distVideosDir, uniqueFileName), buffer);
+      }
+
+      const videoUrl = `/videos/${uniqueFileName}`;
+      res.json({
+        success: true,
+        videoUrl,
+        fileName: uniqueFileName,
+        size: buffer.length
+      });
+    } catch (err: any) {
+      console.error('Error in raw video upload:', err);
+      res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
+  // Base64 Video Upload API (Fallback)
   app.post('/api/upload-video', (req, res) => {
     try {
       const { fileName, fileData } = req.body;

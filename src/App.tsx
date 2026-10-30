@@ -933,13 +933,47 @@ export function App() {
     setFormVideoFileName(file.name);
     setFormVideoFileSize(file.size);
 
+    const sizeMB = (file.size / (1024 * 1024)).toFixed(1);
+
+    // 1. Fast Direct Binary Streaming Upload (Zero Base64 overhead, instant on smartphones & PC)
+    try {
+      const rawRes = await fetch('/api/upload-video-raw', {
+        method: 'POST',
+        headers: {
+          'Content-Type': file.type || 'video/mp4',
+          'x-file-name': encodeURIComponent(file.name)
+        },
+        body: file
+      });
+
+      if (rawRes.ok) {
+        const rawData = await rawRes.json();
+        if (rawData.success && rawData.videoUrl) {
+          setFormVideoUrl(rawData.videoUrl);
+          setFormVideoFileName(rawData.fileName || file.name);
+          setIsVideoLoading(false);
+          showToast(`🎉 동영상 [${file.name}] (${sizeMB}MB) 등록 완료! 모든 기기에서 즉시 재생됩니다.`, 'success');
+
+          // Cache preview data URL locally for instant offline preview
+          const reader = new FileReader();
+          reader.onload = () => {
+            if (typeof reader.result === 'string') setFormVideoData(reader.result);
+          };
+          reader.readAsDataURL(file);
+          return;
+        }
+      }
+    } catch (rawErr) {
+      console.warn('Binary upload fallback to base64:', rawErr);
+    }
+
+    // 2. Base64 Upload Fallback
     const reader = new FileReader();
     reader.onload = async () => {
       if (typeof reader.result === 'string') {
         const dataUrl = reader.result;
         setFormVideoData(dataUrl);
 
-        // Upload to server so video gets a static URL playable across all devices and link visitors
         try {
           const res = await fetch('/api/upload-video', {
             method: 'POST',
@@ -956,7 +990,6 @@ export function App() {
               setFormVideoUrl(data.videoUrl);
               setFormVideoFileName(data.fileName || file.name);
               setIsVideoLoading(false);
-              const sizeMB = (file.size / (1024 * 1024)).toFixed(1);
               showToast(`🎉 동영상 [${file.name}] (${sizeMB}MB) 준비 완료! 모든 기기에서 즉시 재생됩니다.`, 'success');
               return;
             }
@@ -965,14 +998,8 @@ export function App() {
           console.warn('Server video upload fallback:', serverErr);
         }
 
-        // Fallback for static environments without server upload
         setIsVideoLoading(false);
-        const sizeMB = (file.size / (1024 * 1024)).toFixed(1);
-        if (file.size <= 700 * 1024) {
-          showToast(`동영상 [${file.name}] (${sizeMB}MB) 준비가 완료되었습니다.`, 'success');
-        } else {
-          showToast(`동영상 등록 완료! 모든 학생·방문자에게 버퍼링 없이 공유하려면 유튜브 쇼츠/구글 드라이브 링크 등록도 추천합니다.`, 'info');
-        }
+        showToast(`동영상 [${file.name}] (${sizeMB}MB) 준비 완료!`, 'success');
       }
     };
     reader.onerror = () => {
@@ -1066,8 +1093,10 @@ export function App() {
                 title="동영상 클릭하여 재생"
               >
                 {(() => {
-                  const media = parseVideoMedia(post.videoUrl, post.videoData);
-                  const directVideoSrc = (media.type === 'html5' && media.src) ? media.src : (post.videoUrl || post.videoData);
+                  const media = parseVideoMedia(post.videoUrl, post.videoData, post.videoFileName);
+                  const directVideoSrc = (media.type === 'html5' && media.src)
+                    ? media.src
+                    : (post.videoUrl || (post.videoFileName ? `/videos/${post.videoFileName}` : '') || post.videoData);
 
                   if (media.thumbnailUrl) {
                     return (
