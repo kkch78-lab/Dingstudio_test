@@ -4,5 +4,8 @@ service cloud.firestore {
     match /posts/{postId} {
       allow read, write: if true;
     }
+    match /deleted_posts/{postId} {
+      allow read, write: if true;
+    }
   }
 }

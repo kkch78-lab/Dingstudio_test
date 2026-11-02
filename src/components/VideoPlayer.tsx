@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { parseVideoMedia } from '../utils/mediaHelper';
-import { Play, Pause, ArrowUpRight, Film, CircleAlert, Download, RefreshCw, Maximize, Volume2, VolumeX } from 'lucide-react';
+import { Play, Pause, ArrowUpRight, Film, CircleAlert, Download, RefreshCw, Maximize, Volume2, VolumeX, Upload } from 'lucide-react';
 
 interface VideoPlayerProps {
   videoUrl?: string;
@@ -11,6 +11,7 @@ interface VideoPlayerProps {
   compact?: boolean;
   videoFileName?: string;
   onOpenModal?: () => void;
+  onReuploadVideo?: (file: File) => void;
 }
 
 export const VideoPlayer: React.FC<VideoPlayerProps> = ({
@@ -21,7 +22,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   className = '',
   compact = false,
   videoFileName,
-  onOpenModal
+  onOpenModal,
+  onReuploadVideo
 }) => {
   const media = parseVideoMedia(videoUrl, videoData, videoFileName);
   const [hasError, setHasError] = useState(false);
@@ -59,7 +61,24 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       <div className={`p-6 rounded-2xl bg-slate-900 text-slate-300 border border-slate-800 text-center flex flex-col items-center justify-center gap-2 ${className}`}>
         <Film className="w-8 h-8 text-rose-500 animate-pulse" />
         <p className="text-xs font-bold text-white">등록된 영상 파일을 준비 중입니다.</p>
-        <p className="text-[11px] text-slate-400">잠시 후 다시 시도하거나 게시물을 확인해주세요.</p>
+        <p className="text-[11px] text-slate-400">
+          {videoFileName ? `[${videoFileName}] 파일이 아직 서버에 업로드되지 않았습니다.` : '스마트폰이나 카카오톡의 원본 영상 파일을 등록해주세요.'}
+        </p>
+        {onReuploadVideo && (
+          <label className="mt-2 px-3.5 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold flex items-center gap-1.5 transition-colors shadow-sm cursor-pointer">
+            <Upload className="w-3.5 h-3.5" />
+            <span>카톡·폰 영상 파일 등록하기</span>
+            <input
+              type="file"
+              accept="video/*,.mp4,.mov,.MOV,.webm,.m4v,.3gp"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) onReuploadVideo(f);
+              }}
+            />
+          </label>
+        )}
       </div>
     );
   }
@@ -154,6 +173,22 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             <Download className="w-3.5 h-3.5" />
             <span>영상 다운로드</span>
           </a>
+
+          {onReuploadVideo && (
+            <label className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1.5 transition-colors shadow-sm cursor-pointer">
+              <Upload className="w-3.5 h-3.5" />
+              <span>카톡·폰 영상 파일 교체</span>
+              <input
+                type="file"
+                accept="video/*,.mp4,.mov,.MOV,.webm,.m4v,.3gp"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) onReuploadVideo(f);
+                }}
+              />
+            </label>
+          )}
         </div>
       </div>
     );
@@ -290,6 +325,22 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                 <Download className="w-3 h-3" />
                 <span>저장</span>
               </a>
+
+              {onReuploadVideo && (
+                <label className="px-2.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1 transition-colors shadow-xs cursor-pointer" title="카카오톡 또는 휴대폰 영상으로 동기화/교체">
+                  <Upload className="w-3 h-3" />
+                  <span>영상 싱크/교체</span>
+                  <input
+                    type="file"
+                    accept="video/*,.mp4,.mov,.MOV,.webm,.m4v,.3gp"
+                    className="hidden"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) onReuploadVideo(f);
+                    }}
+                  />
+                </label>
+              )}
 
               <button
                 type="button"

@@ -35,11 +35,6 @@ export function parseVideoMedia(urlOrData?: string, videoData?: string, fileName
     }
   }
 
-  // If still empty but called for a video context, ensure fallback to default sports clip so it always plays
-  if (!raw && fileName) {
-    raw = '/videos/wongok_reels_jump_shot.mp4';
-  }
-
   if (!raw) {
     return { type: 'none', src: '' };
   }

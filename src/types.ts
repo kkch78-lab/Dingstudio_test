@@ -6,6 +6,9 @@ export interface Post {
   content: string;
   date: string;
   views: number;
+  lastUpdated: number;
+  isDeleted?: boolean;
+  deletedAt?: number;
   isFlagged?: boolean;
   flaggedReason?: string;
   fileUrl?: string;

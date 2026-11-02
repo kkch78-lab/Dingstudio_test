@@ -9,7 +9,8 @@
     "views": 142,
     "imageUrl": "/images/wongok_oasis_gym.jpg",
     "imageFileName": "wongok_oasis_gym.jpg",
-    "fileUrl": "2026_원곡중_자율체육_운영안내서.hwp"
+    "fileUrl": "2026_원곡중_자율체육_운영안내서.hwp",
+    "lastUpdated": 1787875200000
   },
   {
     "id": "post-2",
@@ -21,7 +22,8 @@
     "views": 98,
     "imageUrl": "/images/wongok_soccer_league.jpg",
     "imageFileName": "wongok_soccer_league.jpg",
-    "fileUrl": "2026_주말스포츠클럽_대진표_서식.pdf"
+    "fileUrl": "2026_주말스포츠클럽_대진표_서식.pdf",
+    "lastUpdated": 1787961600000
   },
   {
     "id": "post-3",
@@ -32,7 +34,8 @@
     "date": "2026-08-30",
     "views": 215,
     "imageUrl": "/images/wongok_sports_festival.jpg",
-    "imageFileName": "wongok_sports_festival.jpg"
+    "imageFileName": "wongok_sports_festival.jpg",
+    "lastUpdated": 1788048000000
   },
   {
     "id": "post-4",
@@ -45,7 +48,8 @@
     "videoUrl": "/videos/wongok_reels_jump_shot.mp4",
     "videoData": "/videos/wongok_reels_jump_shot.mp4",
     "videoFileName": "wongok_reels_jump_shot.mp4",
-    "videoSourceType": "file"
+    "videoSourceType": "file",
+    "lastUpdated": 1788048000000
   },
   {
     "id": "post-5",
@@ -57,6 +61,7 @@
     "views": 187,
     "imageUrl": "/images/wongok_student_referee.jpg",
     "imageFileName": "wongok_student_referee.jpg",
-    "fileUrl": "학생심판단_공식_판정_핸드북_2026.pdf"
+    "fileUrl": "학생심판단_공식_판정_핸드북_2026.pdf",
+    "lastUpdated": 1788048000000
   }
 ]

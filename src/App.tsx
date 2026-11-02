@@ -39,6 +39,7 @@ import { storeVideoMedia, loadVideoMedia, deleteVideoMedia } from './utils/media
 import { optimizeImageFile } from './utils/imageOptimizer';
 import { Post, RentalItem, MatchItem, UserRole, ToastInfo } from './types';
 import { INITIAL_POSTS, INITIAL_RENTALS, INITIAL_MATCHES, INITIAL_ANNOUNCEMENTS } from './data/initialData';
+import { mergePostArrays, normalizePost } from './utils/postMerger';
 import { collection, doc, onSnapshot, setDoc, deleteDoc, updateDoc } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from './firebase';
 
@@ -53,43 +54,42 @@ export function App() {
     }
   });
 
-  // Data State with Safe LocalStorage Fallback & INITIAL_POSTS Media Upgrade
+  // Track permanently deleted post IDs to prevent resurrection from local cache or default data
+  const [deletedPostIds, setDeletedPostIds] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem('wongok_deleted_post_ids');
+      if (raw) {
+        const arr = JSON.parse(raw);
+        if (Array.isArray(arr)) return new Set(arr);
+      }
+    } catch {}
+    return new Set();
+  });
+
+  // Data State with Safe LocalStorage Fallback & Conflict Resolution using lastUpdated Timestamp
   const [posts, setPosts] = useState<Post[]>(() => {
     try {
+      const delRaw = localStorage.getItem('wongok_deleted_post_ids');
+      const delSet = new Set<string>(delRaw ? JSON.parse(delRaw) : []);
       const savedStr = localStorage.getItem('wongok_posts');
-      if (!savedStr) return INITIAL_POSTS;
+      const cleanInitial = INITIAL_POSTS.filter((p) => !delSet.has(p.id) && !p.isDeleted);
+      if (!savedStr) return cleanInitial;
       const saved: Post[] = JSON.parse(savedStr);
-      // Ensure initial posts get updated images/videos even if previously cached without them
-      const initialMap = new Map<string, Post>(INITIAL_POSTS.map((p) => [p.id, p]));
-      const merged = saved.map((p) => {
-        const init = initialMap.get(p.id);
-        if (init) {
-          return {
-            ...p,
-            category: p.category === '학생체육지원단' ? '체육대회' : p.category,
-            imageUrl: p.imageUrl || init.imageUrl,
-            imageFileName: p.imageFileName || init.imageFileName,
-            videoUrl: p.videoUrl || init.videoUrl,
-            videoData: p.videoData || init.videoData,
-            videoFileName: p.videoFileName || init.videoFileName,
-            videoSourceType: p.videoSourceType || init.videoSourceType
-          };
-        }
-        return p;
-      });
-      // Add any missing initial posts
-      for (const init of INITIAL_POSTS) {
-        if (!merged.some((p) => p.id === init.id)) {
-          merged.push(init);
-        }
-      }
-      return merged;
+      // Merge INITIAL_POSTS and local storage posts prioritizing the latest lastUpdated timestamp and excluding deleted IDs
+      return mergePostArrays(cleanInitial, saved, delSet);
     } catch {
-      return INITIAL_POSTS;
+      return INITIAL_POSTS.filter((p) => !p.isDeleted);
     }
   });
 
-  // 🚀 1. Real-time Background Sync from Server (/api/posts) - Synchronizes instantly across PC, Mobile, and all visitors
+  // Persist deletedPostIds whenever it changes
+  useEffect(() => {
+    try {
+      localStorage.setItem('wongok_deleted_post_ids', JSON.stringify(Array.from(deletedPostIds)));
+    } catch {}
+  }, [deletedPostIds]);
+
+  // 🚀 1. Real-time Background Sync from Server (/api/posts) - Synchronizes with latest lastUpdated priority and deleted IDs
   useEffect(() => {
     let isMounted = true;
     const fetchServerPosts = async () => {
@@ -97,38 +97,38 @@ export function App() {
         const res = await fetch('/api/posts');
         if (res.ok) {
           const data = await res.json();
-          if (data.success && Array.isArray(data.posts) && data.posts.length > 0) {
-            if (!isMounted) return;
-            setPosts((prevPosts) => {
-              const prevMap = new Map<string, Post>(prevPosts.map((p) => [p.id, p]));
-              const merged: Post[] = [];
+          if (data.success) {
+            const serverDeletedIds: string[] = Array.isArray(data.deletedIds) ? data.deletedIds : [];
 
-              for (const sPost of data.posts as Post[]) {
-                const existing = prevMap.get(sPost.id);
-                if (existing) {
-                  merged.push({
-                    ...sPost,
-                    imageUrl: sPost.imageUrl || existing.imageUrl,
-                    imageFileName: sPost.imageFileName || existing.imageFileName,
-                    videoUrl: sPost.videoUrl || existing.videoUrl,
-                    videoData: sPost.videoData || existing.videoData,
-                    videoFileName: sPost.videoFileName || existing.videoFileName,
-                    views: Math.max(existing.views || 0, sPost.views || 0)
-                  });
-                  prevMap.delete(sPost.id);
-                } else {
-                  merged.push(sPost);
+            // Sync any newly deleted IDs from server into local deleted IDs set
+            if (serverDeletedIds.length > 0) {
+              setActiveReaderPost((prev) => (prev && serverDeletedIds.includes(prev.id) ? null : prev));
+              setActiveVideoModalPost((prev) => (prev && serverDeletedIds.includes(prev.id) ? null : prev));
+              setDeletedPostIds((prev) => {
+                let changed = false;
+                const next = new Set<string>(prev);
+                serverDeletedIds.forEach((id) => {
+                  if (!next.has(id)) {
+                    next.add(id);
+                    changed = true;
+                  }
+                });
+                if (changed) {
+                  try {
+                    localStorage.setItem('wongok_deleted_post_ids', JSON.stringify(Array.from(next)));
+                  } catch {}
                 }
-              }
+                return changed ? next : prev;
+              });
+            }
 
-              // Keep any posts created locally that might not be on server yet
-              for (const remaining of prevMap.values()) {
-                merged.push(remaining);
-              }
-
-              merged.sort((a, b) => (b.date || '').localeCompare(a.date || '') || b.id.localeCompare(a.id));
-              return merged;
-            });
+            if (Array.isArray(data.posts) && isMounted) {
+              setPosts((prevPosts) => {
+                const combinedDeleted = new Set<string>(deletedPostIds);
+                serverDeletedIds.forEach((id) => combinedDeleted.add(id));
+                return mergePostArrays(prevPosts, data.posts as Post[], combinedDeleted);
+              });
+            }
           }
         }
       } catch {
@@ -143,15 +143,16 @@ export function App() {
       isMounted = false;
       clearInterval(interval);
     };
-  }, []);
+  }, [deletedPostIds]);
 
-  // 🚀 2. Real-time Cloud Sync with Firebase Firestore across ALL devices (PC, Mobile, etc.)
+  // 🚀 2. Real-time Cloud Sync with Firebase Firestore across ALL devices with latest lastUpdated priority & deleted tracking
   useEffect(() => {
-    let unsubscribe: (() => void) | undefined;
+    let unsubscribePosts: (() => void) | undefined;
+    let unsubscribeDeleted: (() => void) | undefined;
     try {
       const postsCol = collection(db, 'posts');
 
-      unsubscribe = onSnapshot(
+      unsubscribePosts = onSnapshot(
         postsCol,
         (snapshot) => {
           if (!snapshot.empty) {
@@ -161,36 +162,60 @@ export function App() {
               remotePosts.push({ ...data, id: docSnap.id });
             });
             setPosts((prevPosts) => {
-              const prevMap = new Map<string, Post>(prevPosts.map((p) => [p.id, p]));
-              const merged: Post[] = [];
-              for (const rPost of remotePosts) {
-                const existing = prevMap.get(rPost.id);
-                if (existing) {
-                  merged.push({
-                    ...rPost,
-                    imageUrl: rPost.imageUrl || existing.imageUrl,
-                    imageFileName: rPost.imageFileName || existing.imageFileName,
-                    videoUrl: rPost.videoUrl || existing.videoUrl,
-                    videoData: rPost.videoData || existing.videoData,
-                    videoFileName: rPost.videoFileName || existing.videoFileName,
-                    views: Math.max(existing.views || 0, rPost.views || 0)
-                  });
-                  prevMap.delete(rPost.id);
-                } else {
-                  merged.push(rPost);
+              const liveDeleted = new Set<string>(deletedPostIds);
+              try {
+                const raw = localStorage.getItem('wongok_deleted_post_ids');
+                if (raw) {
+                  const arr = JSON.parse(raw);
+                  if (Array.isArray(arr)) {
+                    arr.forEach((id: string) => liveDeleted.add(id));
+                  }
                 }
-              }
-              for (const remaining of prevMap.values()) {
-                merged.push(remaining);
-              }
-              merged.sort((a, b) => (b.date || '').localeCompare(a.date || '') || b.id.localeCompare(a.id));
-              return merged;
+              } catch {}
+              return mergePostArrays(prevPosts, remotePosts, liveDeleted);
             });
           }
         },
         (error) => {
-          // Gracefully handle Firestore quota/offline without resetting state or disrupting user
           console.warn('Firestore sync note:', error.message);
+        }
+      );
+
+      // Listen to deleted_posts collection in Firestore
+      const deletedCol = collection(db, 'deleted_posts');
+      unsubscribeDeleted = onSnapshot(
+        deletedCol,
+        (snapshot) => {
+          if (!snapshot.empty) {
+            const remoteDelIds: string[] = [];
+            snapshot.forEach((docSnap) => {
+              remoteDelIds.push(docSnap.id);
+            });
+            if (remoteDelIds.length > 0) {
+              setActiveReaderPost((prev) => (prev && remoteDelIds.includes(prev.id) ? null : prev));
+              setActiveVideoModalPost((prev) => (prev && remoteDelIds.includes(prev.id) ? null : prev));
+              setDeletedPostIds((prev) => {
+                let changed = false;
+                const next = new Set<string>(prev);
+                remoteDelIds.forEach((id) => {
+                  if (!next.has(id)) {
+                    next.add(id);
+                    changed = true;
+                  }
+                });
+                if (changed) {
+                  try {
+                    localStorage.setItem('wongok_deleted_post_ids', JSON.stringify(Array.from(next)));
+                  } catch {}
+                }
+                return changed ? next : prev;
+              });
+              setPosts((prev) => prev.filter((p) => !remoteDelIds.includes(p.id)));
+            }
+          }
+        },
+        (error) => {
+          console.warn('Firestore deleted_posts sync note:', error.message);
         }
       );
     } catch (err) {
@@ -198,9 +223,10 @@ export function App() {
     }
 
     return () => {
-      if (unsubscribe) unsubscribe();
+      if (unsubscribePosts) unsubscribePosts();
+      if (unsubscribeDeleted) unsubscribeDeleted();
     };
-  }, []);
+  }, [deletedPostIds]);
   const [rentals, setRentals] = useState<RentalItem[]>(() => {
     try {
       const saved = localStorage.getItem('wongok_rentals');
@@ -222,6 +248,10 @@ export function App() {
   const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
   const [authTargetRole, setAuthTargetRole] = useState<'student_council' | 'admin'>('student_council');
   const [authPassword, setAuthPassword] = useState<string>('');
+  const [pendingAction, setPendingAction] = useState<{
+    type: 'delete' | 'edit';
+    post: Post;
+  } | null>(null);
 
   const [isPostModalOpen, setIsPostModalOpen] = useState<boolean>(false);
   const [postModalMode, setPostModalMode] = useState<'add' | 'edit'>('add');
@@ -275,23 +305,30 @@ export function App() {
   // Safe LocalStorage Sync Helper
   const safeSetLocalStorage = (key: string, data: any) => {
     try {
+      if (key === 'wongok_posts' && Array.isArray(data)) {
+        const clean = data.filter((item) => !item.isDeleted && !deletedPostIds.has(item.id));
+        localStorage.setItem(key, JSON.stringify(clean));
+        return;
+      }
       localStorage.setItem(key, JSON.stringify(data));
     } catch {
       try {
         if (key === 'wongok_posts' && Array.isArray(data)) {
           // If browser localStorage quota is exceeded, strip only oversized media strings
-          const sanitized = data.map((item) => {
-            let copy = { ...item };
-            if (copy.videoData && copy.videoData.length > 300000) {
-              copy.hasStoredVideo = true;
-              copy.videoData = '';
-            }
-            if (copy.imageUrl && copy.imageUrl.length > 500000) {
-              copy.hasStoredImage = true;
-              copy.imageUrl = '';
-            }
-            return copy;
-          });
+          const sanitized = data
+            .filter((item) => !item.isDeleted && !deletedPostIds.has(item.id))
+            .map((item) => {
+              let copy = { ...item };
+              if (copy.videoData && copy.videoData.length > 300000) {
+                copy.hasStoredVideo = true;
+                copy.videoData = '';
+              }
+              if (copy.imageUrl && copy.imageUrl.length > 500000) {
+                copy.hasStoredImage = true;
+                copy.imageUrl = '';
+              }
+              return copy;
+            });
           localStorage.setItem(key, JSON.stringify(sanitized));
         }
       } catch {
@@ -400,9 +437,9 @@ export function App() {
     }
   }, [activeVideoModalPost?.id]);
 
-  // Filtered posts based on active tab and search query
+  // Filtered posts based on active tab and search query - strictly excludes deleted posts
   const filteredPosts = useMemo(() => {
-    let result = posts;
+    let result = posts.filter((p) => !p.isDeleted && !deletedPostIds.has(p.id));
 
     if (currentTab !== 'home') {
       if (currentTab === 'class') {
@@ -429,11 +466,11 @@ export function App() {
     }
 
     return result;
-  }, [posts, currentTab, searchQuery]);
+  }, [posts, currentTab, searchQuery, deletedPostIds]);
 
-  // Filtered posts for the Home Tab
+  // Filtered posts for the Home Tab - strictly excludes deleted posts
   const homePosts = useMemo(() => {
-    let result = posts;
+    let result = posts.filter((p) => !p.isDeleted && !deletedPostIds.has(p.id));
     if (homeFilter !== 'all') {
       if (homeFilter === '자유') {
         result = result.filter((p) => p.category === '자유');
@@ -448,7 +485,7 @@ export function App() {
       }
     }
     return result;
-  }, [posts, homeFilter]);
+  }, [posts, homeFilter, deletedPostIds]);
 
   // Auth Handler
   const isManager = userRole === 'admin' || userRole === 'student_council';
@@ -463,6 +500,19 @@ export function App() {
         showToast('👑 교사 관리자 모드로 성공적으로 전환되었습니다!', 'success');
         setAuthPassword('');
         setIsAuthModalOpen(false);
+        if (pendingAction) {
+          const action = pendingAction;
+          setPendingAction(null);
+          if (action.type === 'delete') {
+            setTimeout(() => {
+              executeDeletePost(action.post.id, action.post.title);
+            }, 150);
+          } else if (action.type === 'edit') {
+            setTimeout(() => {
+              startEditPost(action.post);
+            }, 150);
+          }
+        }
       } else {
         showToast('비밀번호가 올바르지 않습니다. 다시 확인해 주세요.', 'error');
       }
@@ -472,6 +522,19 @@ export function App() {
         showToast('🛡️ 학생 자치 운영단 모드로 성공적으로 전환되었습니다!', 'success');
         setAuthPassword('');
         setIsAuthModalOpen(false);
+        if (pendingAction) {
+          const action = pendingAction;
+          setPendingAction(null);
+          if (action.type === 'delete') {
+            setTimeout(() => {
+              executeDeletePost(action.post.id, action.post.title);
+            }, 150);
+          } else if (action.type === 'edit') {
+            setTimeout(() => {
+              startEditPost(action.post);
+            }, 150);
+          }
+        }
       } else {
         showToast('비밀번호가 올바르지 않습니다. 다시 확인해 주세요.', 'error');
       }
@@ -498,8 +561,12 @@ export function App() {
       defaultCat = '스포츠클럽';
     } else if (currentTab === 'festival') {
       defaultCat = '체육대회';
+    } else if (currentTab === 'class') {
+      defaultCat = '자유';
     } else if (currentTab === 'referee') {
       defaultCat = '학생심판지원단(기자단)';
+    } else if (currentTab === 'home') {
+      defaultCat = homeFilter !== 'all' ? homeFilter : '자유';
     }
 
     setFormCategory(defaultCat);
@@ -517,19 +584,26 @@ export function App() {
     setFormVideoData('');
     setFormVideoFileName('');
     setFormVideoFileSize(0);
-    setVideoInputMode('link');
+    // Default to 'file' so smartphone and KakaoTalk video upload is immediately front-and-center
+    setVideoInputMode('file');
     setIsVideoLoading(false);
     setIsPostModalOpen(true);
   };
 
   // Open Post Editor Modal
-  const openEditPost = (post: Post) => {
+  const openEditPost = (post: Post, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
     if (!isManager) {
-      showToast('게시물 수정은 운영진(교사 또는 학생자치단) 인증 후 가능합니다.', 'error');
-      setAuthTargetRole('student_council');
+      setPendingAction({ type: 'edit', post });
+      setAuthTargetRole('admin');
       setIsAuthModalOpen(true);
+      showToast('게시물 수정을 위해 운영진 비밀번호를 입력해주세요.', 'info');
       return;
     }
+    startEditPost(post);
+  };
+
+  const startEditPost = (post: Post) => {
     setPostModalMode('edit');
     setEditingPostId(post.id);
     setFormCategory(post.category);
@@ -585,14 +659,20 @@ export function App() {
 
     const newPostId = postModalMode === 'edit' && editingPostId ? editingPostId : `post_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
+    const now = Date.now();
+    const existingPost = (postModalMode === 'edit' && editingPostId)
+      ? posts.find((p) => p.id === editingPostId)
+      : undefined;
+
     const payload: Post = {
       id: newPostId,
       category: formCategory,
       title: titleToSave,
       author: authorToSave,
       content: contentToSave,
-      date: new Date().toISOString().split('T')[0],
-      views: 0,
+      date: existingPost?.date || new Date().toISOString().split('T')[0],
+      views: existingPost ? existingPost.views : 0,
+      lastUpdated: now,
       fileUrl: formFileUrl,
       fileData: formFileData,
       linkUrl: formLinkUrl,
@@ -606,7 +686,11 @@ export function App() {
       videoFileSize: formVideoFileSize,
       hasStoredVideo: Boolean(formVideoData || formVideoUrl.trim()),
       videoSourceType: formVideoUrl.trim()
-        ? (formVideoUrl.includes('youtube') || formVideoUrl.includes('youtu.be') ? 'youtube' : 'link')
+        ? (formVideoUrl.includes('youtube') || formVideoUrl.includes('youtu.be')
+            ? 'youtube'
+            : formVideoUrl.startsWith('/videos/')
+            ? 'file'
+            : 'link')
         : formVideoData ? 'file' : undefined
     };
 
@@ -620,11 +704,24 @@ export function App() {
 
     // 1. Instant Optimistic UI Update (Immediate display, zero draft, zero delay)
     if (postModalMode === 'edit' && editingPostId) {
+      // Ensure post is removed from deletedPostIds if being re-saved
+      setDeletedPostIds((prev) => {
+        if (prev.has(editingPostId)) {
+          const next = new Set(prev);
+          next.delete(editingPostId);
+          try {
+            localStorage.setItem('wongok_deleted_post_ids', JSON.stringify(Array.from(next)));
+          } catch {}
+          return next;
+        }
+        return prev;
+      });
+
       setPosts((prevPosts) =>
-        prevPosts.map((p) => (p.id === editingPostId ? { ...p, ...payload } : p))
+        prevPosts.map((p) => (p.id === editingPostId ? { ...p, ...payload, lastUpdated: now } : p))
       );
       if (activeReaderPost && activeReaderPost.id === editingPostId) {
-        setActiveReaderPost({ ...activeReaderPost, ...payload });
+        setActiveReaderPost({ ...activeReaderPost, ...payload, lastUpdated: now });
       }
       showToast('✅ 게시물이 성공적으로 수정 및 반영되었습니다.', 'success');
       // Sync update to server
@@ -689,9 +786,11 @@ export function App() {
 
     if (!window.confirm(confirmMsg)) return;
 
+    const now = Date.now();
     const updatePayload = {
       isFlagged: nextFlag,
-      flaggedReason: nextFlag ? '학생자치회/관리자 검토에 의해 블라인드 처리된 게시물입니다.' : ''
+      flaggedReason: nextFlag ? '학생자치회/관리자 검토에 의해 블라인드 처리된 게시물입니다.' : '',
+      lastUpdated: now
     };
 
     setPosts(posts.map((p) => (p.id === id ? { ...p, ...updatePayload } : p)));
@@ -709,39 +808,103 @@ export function App() {
     });
   };
 
-  // Delete Post (Managers Only)
-  const handleDeletePost = (id: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (!isManager) {
-      showToast('게시물 삭제는 운영진(교사 또는 학생자치단) 인증 후 가능합니다.', 'error');
-      setAuthTargetRole('student_council');
-      setIsAuthModalOpen(true);
-      return;
-    }
-    if (!window.confirm('운영진 권한으로 이 자료를 영구 삭제하시겠습니까?')) return;
+  // Execute Permanent Delete (Removes completely from Local state, LocalStorage, Server, and Firestore)
+  const executeDeletePost = async (id: string, postTitle?: string) => {
+    // 1. Immediately record in deletedPostIds to prevent any background sync from reviving it
+    setDeletedPostIds((prev) => {
+      const next = new Set(prev);
+      next.add(id);
+      try {
+        localStorage.setItem('wongok_deleted_post_ids', JSON.stringify(Array.from(next)));
+      } catch {}
+      return next;
+    });
 
+    // 2. Immediately remove from posts state & localStorage
+    setPosts((prev) => {
+      const next = prev.filter((p) => p.id !== id);
+      safeSetLocalStorage('wongok_posts', next);
+      return next;
+    });
+
+    // 3. Close open reader/video modals if matching
+    if (activeReaderPost?.id === id) setActiveReaderPost(null);
+    if (activeVideoModalPost?.id === id) setActiveVideoModalPost(null);
+
+    // 4. Remove local cached media from IndexedDB
     deleteVideoMedia(id);
     deleteVideoMedia('img_' + id);
-    setPosts(posts.filter((p) => p.id !== id));
-    showToast('자료가 성공적으로 삭제되었습니다.');
-    if (activeReaderPost?.id === id) setActiveReaderPost(null);
-    fetch(`/api/posts/${id}`, { method: 'DELETE' }).catch(() => {});
-    deleteDoc(doc(db, 'posts', id)).catch((err) => {
-      handleFirestoreError(err, OperationType.DELETE, `posts/${id}`);
-    });
+
+    showToast(
+      postTitle
+        ? `🗑️ [${postTitle}] 게시물이 영구 삭제되었습니다. 홈페이지와 모든 마당에서 완전히 제거되었습니다.`
+        : '🗑️ 게시물이 영구 삭제되었습니다. 홈페이지와 모든 마당에서 완전히 제거되었습니다.',
+      'success'
+    );
+
+    // 5. Notify server (/api/posts/:id and /api/deleted-posts)
+    try {
+      fetch(`/api/posts/${id}`, { method: 'DELETE' }).catch(() => {});
+      fetch('/api/deleted-posts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id })
+      }).catch(() => {});
+    } catch {}
+
+    // 6. Delete from Firestore and record tombstone in deleted_posts collection
+    try {
+      deleteDoc(doc(db, 'posts', id)).catch((err) => {
+        handleFirestoreError(err, OperationType.DELETE, `posts/${id}`);
+      });
+      setDoc(doc(db, 'deleted_posts', id), {
+        id,
+        deletedAt: Date.now(),
+        deletedBy: userRole === 'admin' ? 'teacher_admin' : 'student_council'
+      }).catch((err) => {
+        handleFirestoreError(err, OperationType.CREATE, `deleted_posts/${id}`);
+      });
+    } catch (err) {
+      console.warn('Firestore deletion sync note:', err);
+    }
+  };
+
+  // Delete Post Entrypoint (With Admin Auth Verification)
+  const handleDeletePost = (postOrId: Post | string, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    const id = typeof postOrId === 'string' ? postOrId : postOrId.id;
+    const post = typeof postOrId === 'string' ? posts.find((p) => p.id === id) : postOrId;
+    const title = post?.title || '해당';
+
+    if (!isManager) {
+      if (post) {
+        setPendingAction({ type: 'delete', post });
+      }
+      setAuthTargetRole('admin');
+      setIsAuthModalOpen(true);
+      showToast('게시물 삭제를 위해 운영진 비밀번호를 입력해주세요.', 'info');
+      return;
+    }
+
+    if (!window.confirm(`운영진 권한으로 [${title}] 게시물을 영구 삭제하시겠습니까?\n삭제 후에는 홈페이지 및 모든 마당에서 즉시 제거되며 다시 나타나지 않습니다.`)) {
+      return;
+    }
+
+    executeDeletePost(id, post?.title);
   };
 
   // Open Reader & Increment Views
   const handleOpenReader = (post: Post) => {
     setActiveReaderPost(post);
     const nextViews = (post.views || 0) + 1;
-    setPosts((prev) => prev.map((p) => (p.id === post.id ? { ...p, views: nextViews } : p)));
+    const now = Date.now();
+    setPosts((prev) => prev.map((p) => (p.id === post.id ? { ...p, views: nextViews, lastUpdated: now } : p)));
     fetch(`/api/posts/${post.id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ views: nextViews })
+      body: JSON.stringify({ views: nextViews, lastUpdated: now })
     }).catch(() => {});
-    updateDoc(doc(db, 'posts', post.id), { views: nextViews }).catch(() => {});
+    updateDoc(doc(db, 'posts', post.id), { views: nextViews, lastUpdated: now }).catch(() => {});
   };
 
   // Rent Equipment Submit
@@ -1018,6 +1181,83 @@ export function App() {
     showToast('첨부된 동영상이 삭제되었습니다.', 'info');
   };
 
+  // Direct Video Synchronization for any post (Syncs KakaoTalk & Phone videos seamlessly)
+  const handleDirectPostVideoSync = async (targetPost: Post, file: File) => {
+    if (!file) return;
+
+    if (file.size > 100 * 1024 * 1024) {
+      showToast('동영상 파일 용량은 최대 100MB까지 지원됩니다.', 'error');
+      return;
+    }
+
+    const sizeMB = (file.size / (1024 * 1024)).toFixed(1);
+    showToast(`🎬 동영상 [${file.name}] (${sizeMB}MB) 서버 전송 및 싱크 작업 중...`, 'info');
+
+    try {
+      const res = await fetch(`/api/posts/${targetPost.id}/video`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': file.type || 'video/mp4',
+          'x-file-name': encodeURIComponent(file.name)
+        },
+        body: file
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && data.videoUrl) {
+          const now = data.lastUpdated || Date.now();
+          const updatedPatch = {
+            videoUrl: data.videoUrl,
+            videoFileName: file.name,
+            videoFileSize: file.size,
+            videoSourceType: 'file' as const,
+            hasStoredVideo: true,
+            lastUpdated: now
+          };
+
+          // Cache in IndexedDB for local instant playback
+          const reader = new FileReader();
+          reader.onload = () => {
+            if (typeof reader.result === 'string') {
+              storeVideoMedia(targetPost.id, reader.result, file.name, undefined, file.size);
+            }
+          };
+          reader.readAsDataURL(file);
+
+          // Update local posts state
+          setPosts((prev) =>
+            prev.map((p) => (p.id === targetPost.id ? { ...p, ...updatedPatch } : p))
+          );
+
+          if (activeReaderPost && activeReaderPost.id === targetPost.id) {
+            setActiveReaderPost((prev) => (prev ? { ...prev, ...updatedPatch } : null));
+          }
+
+          if (activeVideoModalPost && activeVideoModalPost.id === targetPost.id) {
+            setActiveVideoModalPost((prev) => (prev ? { ...prev, ...updatedPatch } : null));
+          }
+
+          // Sync to Firebase Firestore for cloud persistence across all visitors
+          const firestoreDoc: Record<string, any> = {
+            ...updatedPatch,
+            videoData: '' // Keep doc light, streaming is from videoUrl
+          };
+          updateDoc(doc(db, 'posts', targetPost.id), firestoreDoc).catch((err) => {
+            handleFirestoreError(err, OperationType.UPDATE, `posts/${targetPost.id}`);
+          });
+
+          showToast(`🎉 [${file.name}] 영상이 성공적으로 싱크되었습니다! 모든 기기에서 즉시 재생됩니다.`, 'success');
+          return;
+        }
+      }
+    } catch (err) {
+      console.error('Direct video sync error:', err);
+    }
+
+    showToast('동영상 싱크 처리 중 오류가 발생했습니다. 다시 시도해주세요.', 'error');
+  };
+
   // Reusable Post Card Component
   const renderPostCard = (post: Post, isHomeFeed: boolean = false) => {
     return (
@@ -1217,13 +1457,14 @@ export function App() {
               </button>
             )}
 
-            {/* Edit & Delete: ONLY for Authenticated Managers (Teachers / Student Council) */}
-            {isManager && (
+            {/* Edit & Delete: Authenticated Managers or with Quick Auth */}
+            {isManager ? (
               <div className="flex items-center gap-1">
                 <button
+                  type="button"
                   onClick={(e) => {
                     e.stopPropagation();
-                    openEditPost(post);
+                    openEditPost(post, e);
                   }}
                   className="p-1.5 rounded-lg border border-slate-200 text-slate-500 hover:text-emerald-800 hover:bg-emerald-50 hover:border-emerald-300 transition-colors flex items-center gap-1 text-[11px] font-bold"
                   title="운영진 권한: 게시물 수정"
@@ -1233,11 +1474,36 @@ export function App() {
                 </button>
 
                 <button
-                  onClick={(e) => handleDeletePost(post.id, e)}
+                  type="button"
+                  onClick={(e) => handleDeletePost(post, e)}
                   className="p-1.5 rounded-lg border border-slate-200 text-slate-400 hover:text-rose-600 hover:bg-rose-50 hover:border-rose-300 transition-colors flex items-center gap-1 text-[11px] font-bold"
-                  title="운영진 권한: 게시물 삭제"
+                  title="운영진 권한: 게시물 영구 삭제"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">삭제</span>
+                </button>
+              </div>
+            ) : (
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    openEditPost(post, e);
+                  }}
+                  className="p-1.5 rounded-lg border border-slate-200/80 text-slate-500 hover:text-emerald-700 hover:bg-emerald-50 hover:border-emerald-200 transition-colors flex items-center gap-1 text-[10.5px] font-semibold"
+                  title="운영진 비밀번호 인증 후 게시물 수정"
+                >
+                  <Pencil className="w-3 h-3 text-slate-400 group-hover:text-emerald-600" />
+                  <span className="hidden sm:inline">수정</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={(e) => handleDeletePost(post, e)}
+                  className="p-1.5 rounded-lg border border-slate-200/80 text-slate-400 hover:text-rose-600 hover:bg-rose-50 hover:border-rose-200 transition-colors flex items-center gap-1 text-[10.5px] font-semibold"
+                  title="운영진 비밀번호 인증 후 게시물 영구 삭제"
+                >
+                  <Trash2 className="w-3 h-3 text-slate-400 group-hover:text-rose-500" />
                   <span className="hidden sm:inline">삭제</span>
                 </button>
               </div>
@@ -1945,21 +2211,39 @@ export function App() {
               {/* Video Player (Direct Upload / YouTube / Web Video) */}
               {(activeReaderPost.videoUrl || activeReaderPost.videoData || activeReaderPost.videoFileName) && (
                 <div className="space-y-2">
-                  <div className="flex items-center justify-between">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="text-xs font-black text-slate-700 flex items-center gap-1.5">
                       <Film className="w-4 h-4 text-rose-500" />
                       <span>첨부 영상 미디어 ({activeReaderPost.videoFileName || '원곡 스포츠 영상'})</span>
                     </div>
-                    <span className="text-[10px] text-emerald-700 font-bold bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full flex items-center gap-1">
-                      <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                      <span>스마트폰·PC 전체 즉시 재생</span>
-                    </span>
+                    <div className="flex items-center gap-2">
+                      <label className="cursor-pointer px-2.5 py-1 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-[11px] font-bold flex items-center gap-1 transition-colors shadow-2xs">
+                        <Upload className="w-3 h-3 text-rose-600" />
+                        <span>카톡·폰 영상으로 싱크/교체</span>
+                        <input
+                          type="file"
+                          accept="video/*,.mp4,.mov,.MOV,.webm,.m4v,.3gp"
+                          className="hidden"
+                          onChange={(e) => {
+                            const f = e.target.files?.[0];
+                            if (f && activeReaderPost) {
+                              handleDirectPostVideoSync(activeReaderPost, f);
+                            }
+                          }}
+                        />
+                      </label>
+                      <span className="text-[10px] text-emerald-700 font-bold bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full flex items-center gap-1">
+                        <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                        <span>스마트폰·PC 전체 즉시 재생</span>
+                      </span>
+                    </div>
                   </div>
                   <VideoPlayer
                     videoUrl={activeReaderPost.videoUrl}
                     videoData={activeReaderPost.videoData}
                     videoFileName={activeReaderPost.videoFileName}
                     title={activeReaderPost.title}
+                    onReuploadVideo={(f) => handleDirectPostVideoSync(activeReaderPost, f)}
                   />
                 </div>
               )}
@@ -1998,6 +2282,7 @@ export function App() {
                 {isManager ? (
                   <>
                     <button
+                      type="button"
                       onClick={() => {
                         openEditPost(activeReaderPost);
                         setActiveReaderPost(null);
@@ -2008,13 +2293,15 @@ export function App() {
                       <span>게시물 수정 (운영진)</span>
                     </button>
                     <button
-                      onClick={(e) => handleDeletePost(activeReaderPost.id, e)}
+                      type="button"
+                      onClick={(e) => handleDeletePost(activeReaderPost, e)}
                       className="px-3.5 py-2 rounded-xl bg-rose-50 text-rose-700 border border-rose-200 hover:bg-rose-100 font-bold text-xs flex items-center gap-1.5 transition-colors shadow-xs"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
-                      <span>게시물 삭제 (운영진)</span>
+                      <span>게시물 영구 삭제</span>
                     </button>
                     <button
+                      type="button"
                       onClick={(e) => handleToggleFlag(activeReaderPost.id, e)}
                       className={`px-3 py-2 rounded-xl border text-xs font-bold transition-colors ${
                         activeReaderPost.isFlagged
@@ -2026,13 +2313,34 @@ export function App() {
                     </button>
                   </>
                 ) : (
-                  <div className="text-[11px] text-slate-500 font-medium flex items-center gap-1.5 bg-slate-100 px-3 py-1.5 rounded-lg border border-slate-200">
-                    <Lock className="w-3.5 h-3.5 text-slate-400" />
-                    <span>게시물 수정 및 삭제는 <strong>운영진 인증</strong> 후 가능합니다.</span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={(e) => handleDeletePost(activeReaderPost, e)}
+                      className="px-3 py-1.5 rounded-xl border border-rose-200 text-rose-700 hover:bg-rose-50 font-bold text-xs flex items-center gap-1.5 transition-colors shadow-2xs"
+                      title="운영진 비밀번호 입력 후 삭제"
+                    >
+                      <Trash2 className="w-3.5 h-3.5 text-rose-500" />
+                      <span>운영진 삭제</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => openEditPost(activeReaderPost)}
+                      className="px-3 py-1.5 rounded-xl border border-emerald-200 text-emerald-800 hover:bg-emerald-50 font-bold text-xs flex items-center gap-1.5 transition-colors shadow-2xs"
+                      title="운영진 비밀번호 입력 후 수정"
+                    >
+                      <Pencil className="w-3.5 h-3.5 text-emerald-600" />
+                      <span>운영진 수정</span>
+                    </button>
+                    <div className="text-[11px] text-slate-400 font-medium flex items-center gap-1">
+                      <Lock className="w-3 h-3 text-slate-400" />
+                      <span>비밀번호 인증 후 바로 처리</span>
+                    </div>
                   </div>
                 )}
               </div>
               <button
+                type="button"
                 onClick={() => setActiveReaderPost(null)}
                 className="px-5 py-2 rounded-xl bg-slate-800 hover:bg-slate-900 text-white text-xs font-bold transition-colors"
               >
@@ -2074,14 +2382,55 @@ export function App() {
                   {activeVideoModalPost.title}
                 </h3>
               </div>
-              <button
-                type="button"
-                onClick={() => setActiveVideoModalPost(null)}
-                className="p-1.5 rounded-xl bg-slate-800 text-slate-300 hover:text-white hover:bg-slate-700 transition-colors shrink-0"
-                title="닫기"
-              >
-                <X className="w-5 h-5" />
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    const post = activeVideoModalPost;
+                    openEditPost(post, e);
+                  }}
+                  className="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold flex items-center gap-1 transition-colors shrink-0 border border-slate-700"
+                  title="게시물 수정"
+                >
+                  <Pencil className="w-3.5 h-3.5 text-emerald-400" />
+                  <span className="hidden sm:inline">수정</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    handleDeletePost(activeVideoModalPost, e);
+                  }}
+                  className="px-2.5 py-1.5 rounded-xl bg-rose-900/60 hover:bg-rose-800 text-rose-200 text-xs font-bold flex items-center gap-1 transition-colors shrink-0 border border-rose-700/50"
+                  title="게시물 영구 삭제"
+                >
+                  <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+                  <span>삭제</span>
+                </button>
+                <label className="cursor-pointer px-3 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold flex items-center gap-1.5 transition-colors shadow-sm shrink-0">
+                  <Upload className="w-3.5 h-3.5 text-white" />
+                  <span className="hidden sm:inline">카톡·폰 영상으로 싱크</span>
+                  <span className="sm:hidden">영상 싱크</span>
+                  <input
+                    type="file"
+                    accept="video/*,.mp4,.mov,.MOV,.webm,.m4v,.3gp"
+                    className="hidden"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f && activeVideoModalPost) {
+                        handleDirectPostVideoSync(activeVideoModalPost, f);
+                      }
+                    }}
+                  />
+                </label>
+                <button
+                  type="button"
+                  onClick={() => setActiveVideoModalPost(null)}
+                  className="p-1.5 rounded-xl bg-slate-800 text-slate-300 hover:text-white hover:bg-slate-700 transition-colors shrink-0"
+                  title="닫기"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
             </div>
 
             {/* Video Body */}
@@ -2093,6 +2442,7 @@ export function App() {
                   videoFileName={activeVideoModalPost.videoFileName}
                   title={activeVideoModalPost.title}
                   autoPlay={true}
+                  onReuploadVideo={(f) => handleDirectPostVideoSync(activeVideoModalPost, f)}
                 />
               </div>
 
@@ -2118,6 +2468,16 @@ export function App() {
                 >
                   <BookOpen className="w-3.5 h-3.5 text-emerald-400" />
                   <span>게시글 상세 보기</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={(e) => handleDeletePost(activeVideoModalPost, e)}
+                  className="px-3.5 py-1.5 rounded-xl bg-rose-950/80 hover:bg-rose-900 text-rose-300 border border-rose-800/80 text-xs font-bold transition-colors flex items-center gap-1.5"
+                  title="게시물 영구 삭제"
+                >
+                  <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+                  <span>영상 게시물 영구 삭제</span>
                 </button>
               </div>
 
@@ -2275,31 +2635,64 @@ export function App() {
                 <div className="flex gap-1.5 p-1 bg-slate-200/80 rounded-xl text-xs font-bold">
                   <button
                     type="button"
+                    onClick={() => setVideoInputMode('file')}
+                    className={`flex-1 py-2 px-2.5 rounded-lg transition-all flex items-center justify-center gap-1.5 ${
+                      videoInputMode === 'file'
+                        ? 'bg-rose-600 text-white shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    <Film className="w-3.5 h-3.5" />
+                    <span>카톡 / 폰 영상 직접 첨부 (MP4, MOV)</span>
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => setVideoInputMode('link')}
-                    className={`flex-1 py-1.5 px-2 rounded-lg transition-all flex items-center justify-center gap-1.5 ${
+                    className={`flex-1 py-2 px-2.5 rounded-lg transition-all flex items-center justify-center gap-1.5 ${
                       videoInputMode === 'link'
-                        ? 'bg-white text-rose-600 shadow-xs'
+                        ? 'bg-white text-slate-800 shadow-xs'
                         : 'text-slate-600 hover:text-slate-900'
                     }`}
                   >
                     <Play className="w-3.5 h-3.5 fill-rose-500 text-rose-500" />
                     <span>온라인 링크 (유튜브·쇼츠·드라이브)</span>
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => setVideoInputMode('file')}
-                    className={`flex-1 py-1.5 px-2 rounded-lg transition-all flex items-center justify-center gap-1.5 ${
-                      videoInputMode === 'file'
-                        ? 'bg-white text-emerald-800 shadow-xs'
-                        : 'text-slate-600 hover:text-slate-900'
-                    }`}
-                  >
-                    <Film className="w-3.5 h-3.5 text-emerald-700" />
-                    <span>내 기기 파일 직접 첨부 (MP4)</span>
-                  </button>
                 </div>
 
-                {/* Tab 1: Online Video Link (YouTube, Shorts, Google Drive, Web MP4) */}
+                {/* Tab 1: Direct Video File Upload (Default) */}
+                {videoInputMode === 'file' && (
+                  <div className="space-y-2">
+                    <div className="border-2 border-dashed border-rose-300 bg-rose-50/40 rounded-2xl p-4 text-center hover:border-rose-500 transition-colors">
+                      <Film className="w-8 h-8 text-rose-500 mx-auto mb-1.5" />
+                      <div className="text-sm font-black text-slate-800">
+                        {formVideoUrl || formVideoData ? '동영상 파일 교체하기' : '카카오톡 / 스마트폰 영상 파일 선택'}
+                      </div>
+                      <p className="text-xs text-slate-500 mt-1">
+                        스마트폰 카메라 촬영 영상 또는 카카오톡에서 다운받은 동영상 (MP4, MOV, WebM 등)
+                      </p>
+                      <label className="mt-3 inline-flex items-center gap-1.5 px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold rounded-xl cursor-pointer shadow-sm transition-all hover:scale-105">
+                        <Upload className="w-4 h-4" />
+                        <span>내 기기에서 영상 파일 찾기</span>
+                        <input
+                          type="file"
+                          accept="video/*,.mp4,.mov,.MOV,.webm,.m4v,.mkv,.avi,.3gp,.3gpp,video/mp4,video/quicktime,video/webm"
+                          onChange={handleVideoUpload}
+                          className="hidden"
+                        />
+                      </label>
+                    </div>
+
+                    {/* In-Progress Loading Indicator */}
+                    {isVideoLoading && (
+                      <div className="p-3 bg-rose-50 rounded-xl border border-rose-200 flex items-center gap-2.5 text-xs text-rose-700 font-bold animate-pulse">
+                        <Loader2 className="w-4 h-4 animate-spin text-rose-600 shrink-0" />
+                        <span>동영상 파일을 서버에 전송하고 모든 기기 호환 스트리밍 주소를 생성 중입니다...</span>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Tab 2: Online Video Link (YouTube, Shorts, Google Drive, Web MP4) */}
                 {videoInputMode === 'link' && (
                   <div className="space-y-2">
                     <div>
@@ -2330,7 +2723,7 @@ export function App() {
                     <div className="p-2.5 bg-rose-50/70 rounded-xl border border-rose-100 text-[11px] text-slate-600 space-y-1">
                       <p className="font-bold text-rose-800 flex items-center gap-1">
                         <Sparkles className="w-3.5 h-3.5 text-rose-500 shrink-0" />
-                        <span>누구든 끊김 없이 고화질로 볼 수 있는 추천 방식입니다!</span>
+                        <span>누구든 끊김 없이 고화질로 볼 수 있는 온라인 스트리밍 방식입니다!</span>
                       </p>
                       <ul className="text-[10.5px] text-slate-600 space-y-0.5 list-disc list-inside">
                         <li><strong>유튜브 / 쇼츠</strong>: 스마트폰 앱의 [공유 → 링크 복사] 주소 지원</li>
@@ -2338,35 +2731,6 @@ export function App() {
                         <li><strong>웹 비디오</strong>: 직접 등록된 MP4/WebM 스트리밍 주소 지원</li>
                       </ul>
                     </div>
-                  </div>
-                )}
-
-                {/* Tab 2: Direct Video File Upload */}
-                {videoInputMode === 'file' && (
-                  <div className="space-y-2">
-                    <div className="border-2 border-dashed border-rose-200 bg-white rounded-xl p-3.5 text-center hover:border-rose-400 transition-colors">
-                      <Film className="w-6 h-6 text-rose-400 mx-auto mb-1" />
-                      <div className="text-xs font-black text-slate-800">
-                        {formVideoUrl || formVideoData ? '새 동영상 파일로 교체하기' : '동영상 파일 선택 또는 드래그'}
-                      </div>
-                      <p className="text-[11px] text-slate-400 mt-0.5">
-                        스마트폰 직접 촬영 영상, 카카오톡 다운로드 파일 (MP4, MOV, WebM, M4V, 3GP 등 전기종 호환)
-                      </p>
-                      <input
-                        type="file"
-                        accept="video/*,.mp4,.mov,.MOV,.webm,.m4v,.mkv,.avi,.3gp,.3gpp,video/mp4,video/quicktime,video/webm"
-                        onChange={handleVideoUpload}
-                        className="mt-2 text-[11px] text-slate-600 file:mr-2 file:py-1 file:px-2.5 file:rounded-lg file:border-0 file:text-xs file:font-bold file:bg-rose-500 file:text-white file:hover:bg-rose-600 file:cursor-pointer cursor-pointer"
-                      />
-                    </div>
-
-                    {/* In-Progress Loading Indicator */}
-                    {isVideoLoading && (
-                      <div className="p-3 bg-rose-50 rounded-xl border border-rose-200 flex items-center gap-2.5 text-xs text-rose-700 font-bold animate-pulse">
-                        <Loader2 className="w-4 h-4 animate-spin text-rose-600 shrink-0" />
-                        <span>동영상 파일을 서버에 전송하고 모든 기기 호환 스트리밍 주소를 생성 중입니다...</span>
-                      </div>
-                    )}
                   </div>
                 )}
 
