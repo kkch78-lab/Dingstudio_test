@@ -246,8 +246,9 @@ export function App() {
 
   // Modals & UI Controls
   const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
-  const [authTargetRole, setAuthTargetRole] = useState<'student_council' | 'admin'>('student_council');
+  const [authTargetRole, setAuthTargetRole] = useState<'student' | 'student_council' | 'admin'>('student_council');
   const [authPassword, setAuthPassword] = useState<string>('');
+  const [deleteConfirmTarget, setDeleteConfirmTarget] = useState<{ id: string; title: string } | null>(null);
   const [pendingAction, setPendingAction] = useState<{
     type: 'delete' | 'edit';
     post: Post;
@@ -499,8 +500,17 @@ export function App() {
     e.preventDefault();
     const inputPassword = authPassword.trim();
 
+    if (authTargetRole === 'student') {
+      setUserRole('student');
+      showToast('🧑‍🎓 일반 학생 모드로 전환되었습니다. 모든 소식을 자유롭게 이용하세요!', 'info');
+      setAuthPassword('');
+      setIsAuthModalOpen(false);
+      setPendingAction(null);
+      return;
+    }
+
     if (authTargetRole === 'admin') {
-      if (inputPassword === 'wongok1004') {
+      if (inputPassword === 'wongok123' || inputPassword === 'wongok1004') {
         setUserRole('admin');
         showToast('👑 교사 관리자 모드로 성공적으로 전환되었습니다!', 'success');
         setAuthPassword('');
@@ -519,7 +529,7 @@ export function App() {
           }
         }
       } else {
-        showToast('비밀번호가 올바르지 않습니다. 다시 확인해 주세요.', 'error');
+        showToast('비밀번호가 올바르지 않습니다. 다시 확인해 주세요. (기본: wongok123)', 'error');
       }
     } else if (authTargetRole === 'student_council') {
       if (inputPassword === 'wongok1004' || inputPassword === 'wongok123') {
@@ -541,14 +551,14 @@ export function App() {
           }
         }
       } else {
-        showToast('비밀번호가 올바르지 않습니다. 다시 확인해 주세요.', 'error');
+        showToast('비밀번호가 올바르지 않습니다. 다시 확인해 주세요. (기본: wongok1004)', 'error');
       }
     }
   };
 
   const handleLogoutRole = () => {
     setUserRole('student');
-    showToast('일반 학생 권한으로 돌아왔습니다.', 'info');
+    showToast('🧑‍🎓 일반 학생 모드로 전환되었습니다.', 'info');
     setIsAuthModalOpen(false);
   };
 
@@ -796,12 +806,6 @@ export function App() {
     if (!target) return;
 
     const nextFlag = !target.isFlagged;
-    const confirmMsg = nextFlag
-      ? '이 게시물을 부적절한 게시물로 분류하여 일반 학생들에게 블라인드 처리하겠습니까?'
-      : '이 게시물의 블라인드 처리를 해제하고 일반 학생들에게 다시 노출하겠습니까?';
-
-    if (!window.confirm(confirmMsg)) return;
-
     const now = Date.now();
     const updatePayload = {
       isFlagged: nextFlag,
@@ -810,7 +814,7 @@ export function App() {
     };
 
     setPosts(posts.map((p) => (p.id === id ? { ...p, ...updatePayload } : p)));
-    showToast(nextFlag ? '게시물이 블라인드(가림) 처리되었습니다.' : '게시물 블라인드가 해제되었습니다.');
+    showToast(nextFlag ? '게시물이 블라인드(가림) 처리되었습니다.' : '게시물 블라인드가 해제되었습니다.', 'info');
     if (activeReaderPost?.id === id) {
       setActiveReaderPost({ ...activeReaderPost, ...updatePayload });
     }
@@ -885,7 +889,7 @@ export function App() {
     }
   };
 
-  // Delete Post Entrypoint (With Admin Auth Verification)
+  // Delete Post Entrypoint (With Admin Auth Verification & In-App Dialog)
   const handleDeletePost = (postOrId: Post | string, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
     const id = typeof postOrId === 'string' ? postOrId : postOrId.id;
@@ -896,17 +900,14 @@ export function App() {
       if (post) {
         setPendingAction({ type: 'delete', post });
       }
-      setAuthTargetRole('admin');
+      setAuthTargetRole('student_council');
       setIsAuthModalOpen(true);
       showToast('게시물 삭제를 위해 운영진 비밀번호를 입력해주세요.', 'info');
       return;
     }
 
-    if (!window.confirm(`운영진 권한으로 [${title}] 게시물을 영구 삭제하시겠습니까?\n삭제 후에는 홈페이지 및 모든 마당에서 즉시 제거되며 다시 나타나지 않습니다.`)) {
-      return;
-    }
-
-    executeDeletePost(id, post?.title);
+    // Trigger in-app deletion modal safely without window.confirm
+    setDeleteConfirmTarget({ id, title });
   };
 
   // Open Reader & Increment Views
@@ -2967,75 +2968,170 @@ export function App() {
         <div
           id="auth-wizard-modal"
           className="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm animate-fade-in"
-          onClick={() => setIsAuthModalOpen(false)}
+          onClick={() => {
+            setIsAuthModalOpen(false);
+            setPendingAction(null);
+          }}
         >
           <div
-            className="bg-white rounded-3xl w-full max-w-sm shadow-2xl relative overflow-hidden flex flex-col"
+            className="bg-white rounded-3xl w-full max-w-md shadow-2xl relative overflow-hidden flex flex-col"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="h-2 bg-amber-500" />
+            <div className={`h-2.5 ${
+              authTargetRole === 'admin'
+                ? 'bg-amber-500'
+                : authTargetRole === 'student_council'
+                ? 'bg-emerald-600'
+                : 'bg-blue-500'
+            }`} />
             <form onSubmit={handleAuthSubmit} className="p-6 space-y-4">
               <div className="flex items-center justify-between">
-                <h3 className="font-extrabold text-base text-slate-900 flex items-center gap-2">
-                  <Lock className="w-4 h-4 text-amber-500" />
-                  사용자 권한 전환
-                </h3>
+                <div>
+                  <h3 className="font-extrabold text-base text-slate-900 flex items-center gap-2">
+                    <Lock className="w-4 h-4 text-emerald-700" />
+                    모드 및 운영진 권한 설정
+                  </h3>
+                  <p className="text-[11px] text-slate-400 mt-0.5">
+                    현재 적용 모드: <span className="font-bold text-slate-700">
+                      {userRole === 'admin' ? '👑 교사 관리자' : userRole === 'student_council' ? '🛡️ 학생 관리자' : '🧑‍🎓 일반 학생 모드'}
+                    </span>
+                  </p>
+                </div>
                 <button
                   type="button"
-                  onClick={() => setIsAuthModalOpen(false)}
-                  className="text-slate-400 hover:text-slate-600"
+                  onClick={() => {
+                    setIsAuthModalOpen(false);
+                    setPendingAction(null);
+                  }}
+                  className="text-slate-400 hover:text-slate-600 p-1 rounded-lg hover:bg-slate-100"
                 >
                   <X className="w-5 h-5" />
                 </button>
               </div>
 
-              <div className="flex gap-2 p-1 bg-slate-100 rounded-xl text-xs font-bold">
+              {pendingAction && (
+                <div className="p-3 bg-amber-50 rounded-2xl border border-amber-200 text-xs text-amber-900 space-y-1">
+                  <div className="font-extrabold flex items-center gap-1.5 text-amber-800">
+                    <CircleAlert className="w-4 h-4 text-amber-600" />
+                    <span>게시물 {pendingAction.type === 'delete' ? '영구 삭제' : '수정'} 인증 필요</span>
+                  </div>
+                  <p className="text-[11px] text-amber-700">
+                    [{pendingAction.post.title}] 작업을 위해 학생 관리자 또는 교사 관리자 비밀번호를 입력해주세요.
+                  </p>
+                </div>
+              )}
+
+              {/* 3-Way Role Selector */}
+              <div className="grid grid-cols-3 gap-1.5 p-1 bg-slate-100 rounded-2xl text-[11px] font-bold">
+                <button
+                  type="button"
+                  onClick={() => setAuthTargetRole('student')}
+                  className={`py-2 px-1 rounded-xl transition-all flex flex-col items-center gap-1 ${
+                    authTargetRole === 'student' ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'
+                  }`}
+                >
+                  <User className="w-4 h-4" />
+                  <span>일반 학생</span>
+                </button>
                 <button
                   type="button"
                   onClick={() => setAuthTargetRole('student_council')}
-                  className={`flex-1 py-1.5 rounded-lg transition-all ${
-                    authTargetRole === 'student_council' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500'
+                  className={`py-2 px-1 rounded-xl transition-all flex flex-col items-center gap-1 ${
+                    authTargetRole === 'student_council' ? 'bg-white text-emerald-800 shadow-sm' : 'text-slate-500 hover:text-slate-800'
                   }`}
                 >
-                  학생 자치 운영단
+                  <Shield className="w-4 h-4" />
+                  <span>학생 관리자</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => setAuthTargetRole('admin')}
-                  className={`flex-1 py-1.5 rounded-lg transition-all ${
-                    authTargetRole === 'admin' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500'
+                  className={`py-2 px-1 rounded-xl transition-all flex flex-col items-center gap-1 ${
+                    authTargetRole === 'admin' ? 'bg-white text-amber-800 shadow-sm' : 'text-slate-500 hover:text-slate-800'
                   }`}
                 >
-                  교사 관리자
+                  <Sparkles className="w-4 h-4" />
+                  <span>교사 관리자</span>
                 </button>
               </div>
 
-              <div>
-                <label className="block text-xs font-extrabold text-slate-500 mb-1">
-                  비밀번호 입력
-                </label>
-                <input
-                  type="password"
-                  required
-                  placeholder="운영진 비밀번호를 입력하세요"
-                  value={authPassword}
-                  onChange={(e) => setAuthPassword(e.target.value)}
-                  className="w-full border rounded-xl px-3.5 py-2 text-xs font-semibold text-slate-800 focus:outline-none focus:border-emerald-700"
-                />
-              </div>
+              {/* Role Description Card */}
+              {authTargetRole === 'student' ? (
+                <div className="p-3.5 bg-blue-50/70 rounded-2xl border border-blue-100 space-y-1.5">
+                  <div className="text-xs font-black text-blue-900 flex items-center gap-1.5">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-blue-600" />
+                    <span>누구나 자유롭게 이용하는 기본 학생 모드</span>
+                  </div>
+                  <p className="text-[11px] text-blue-700 leading-relaxed">
+                    홈페이지의 모든 영상, 릴스, 경기 결과, 대회 소식을 비밀번호 없이 자유롭게 열람하고 소식을 등록할 수 있습니다.
+                  </p>
+                </div>
+              ) : authTargetRole === 'student_council' ? (
+                <div className="p-3.5 bg-emerald-50/70 rounded-2xl border border-emerald-100 space-y-1.5">
+                  <div className="text-xs font-black text-emerald-900 flex items-center gap-1.5">
+                    <Shield className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>학생 자치 운영단 (체육지원단 / 심판단)</span>
+                  </div>
+                  <p className="text-[11px] text-emerald-700 leading-relaxed">
+                    게시물 및 영상 등록·수정·영구 삭제, 체육기구 대여 승인 및 반납 처리를 관리할 수 있습니다.
+                  </p>
+                </div>
+              ) : (
+                <div className="p-3.5 bg-amber-50/70 rounded-2xl border border-amber-100 space-y-1.5">
+                  <div className="text-xs font-black text-amber-900 flex items-center gap-1.5">
+                    <Sparkles className="w-3.5 h-3.5 text-amber-600" />
+                    <span>체육교사 최고 관리자 모드</span>
+                  </div>
+                  <p className="text-[11px] text-amber-700 leading-relaxed">
+                    전체 게시판 최고 관리자 권한으로 공지 등록, 모든 게시물/영상 즉시 수정 및 영구 삭제 전권을 가집니다.
+                  </p>
+                </div>
+              )}
+
+              {/* Password Input for student_council & admin */}
+              {authTargetRole !== 'student' && (
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-xs font-extrabold text-slate-700">
+                      {authTargetRole === 'admin' ? '교사 관리자 비밀번호' : '학생 관리자 비밀번호'}
+                    </label>
+                    <span className="text-[10px] text-slate-400">
+                      {authTargetRole === 'admin' ? '초기: wongok123' : '초기: wongok1004'}
+                    </span>
+                  </div>
+                  <input
+                    type="password"
+                    required
+                    placeholder={authTargetRole === 'admin' ? '교사 관리자 비밀번호를 입력하세요' : '학생 관리자 비밀번호를 입력하세요'}
+                    value={authPassword}
+                    onChange={(e) => setAuthPassword(e.target.value)}
+                    className="w-full border rounded-xl px-3.5 py-2.5 text-xs font-semibold text-slate-800 focus:outline-none focus:border-emerald-700 bg-white"
+                  />
+                </div>
+              )}
 
               <div className="pt-2 flex flex-col gap-2">
                 <button
                   type="submit"
-                  className="w-full bg-emerald-900 hover:bg-emerald-800 text-white font-extrabold text-xs py-2.5 rounded-xl transition-all"
+                  className={`w-full text-white font-extrabold text-xs py-2.5 rounded-xl transition-all shadow-md ${
+                    authTargetRole === 'admin'
+                      ? 'bg-amber-600 hover:bg-amber-700 shadow-amber-200'
+                      : authTargetRole === 'student_council'
+                      ? 'bg-emerald-800 hover:bg-emerald-900 shadow-emerald-200'
+                      : 'bg-blue-600 hover:bg-blue-700 shadow-blue-200'
+                  }`}
                 >
-                  권한 전환 완료
+                  {authTargetRole === 'student'
+                    ? '일반 학생 모드로 바로 전환'
+                    : authTargetRole === 'admin'
+                    ? '교사 관리자로 인증 완료'
+                    : '학생 관리자로 인증 완료'}
                 </button>
                 {userRole !== 'student' && (
                   <button
                     type="button"
                     onClick={handleLogoutRole}
-                    className="w-full text-slate-500 hover:bg-slate-50 font-bold text-xs py-2 rounded-xl border"
+                    className="w-full text-slate-500 hover:bg-slate-50 font-bold text-xs py-2 rounded-xl border border-slate-200"
                   >
                     일반 학생 모드로 되돌리기
                   </button>
@@ -3098,6 +3194,53 @@ export function App() {
                 </div>
               )}
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* 🗑️ Safe In-App Delete Confirmation Modal (Guaranteed No iFrame Block) */}
+      {deleteConfirmTarget && (
+        <div
+          id="delete-confirm-modal"
+          className="fixed inset-0 bg-slate-950/80 z-50 flex items-center justify-center p-4 backdrop-blur-xs animate-fade-in"
+          onClick={() => setDeleteConfirmTarget(null)}
+        >
+          <div
+            className="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl space-y-4 border border-rose-100"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="w-12 h-12 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center mx-auto">
+              <Trash2 className="w-6 h-6" />
+            </div>
+            <div className="text-center">
+              <h3 className="text-base font-extrabold text-slate-900">게시물 영구 삭제 확인</h3>
+              <p className="text-xs text-slate-600 mt-1 line-clamp-2">
+                <span className="font-bold text-slate-800">[{deleteConfirmTarget.title}]</span>
+              </p>
+              <p className="text-[11px] text-rose-600 font-semibold mt-2.5 bg-rose-50 p-2.5 rounded-xl border border-rose-200 leading-relaxed text-left">
+                ⚠️ 운영진 권한으로 삭제되며, 삭제 후에는 홈페이지 링크 및 스마트폰·PC 모든 화면에서 영구히 사라집니다.
+              </p>
+            </div>
+            <div className="flex gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setDeleteConfirmTarget(null)}
+                className="flex-1 py-2.5 rounded-xl border border-slate-200 text-xs font-bold text-slate-600 hover:bg-slate-50 transition-colors"
+              >
+                취소
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const { id, title } = deleteConfirmTarget;
+                  setDeleteConfirmTarget(null);
+                  executeDeletePost(id, title);
+                }}
+                className="flex-1 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-xs font-extrabold text-white transition-colors shadow-md shadow-rose-200"
+              >
+                영구 삭제 실행
+              </button>
+            </div>
           </div>
         </div>
       )}
