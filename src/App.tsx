@@ -289,6 +289,7 @@ export function App() {
   const [isImageLoading, setIsImageLoading] = useState<boolean>(false);
   const [formVideoUrl, setFormVideoUrl] = useState<string>('');
   const [formVideoData, setFormVideoData] = useState<string>('');
+  const [formVideoFile, setFormVideoFile] = useState<File | null>(null);
   const [formVideoFileName, setFormVideoFileName] = useState<string>('');
   const [formVideoFileSize, setFormVideoFileSize] = useState<number>(0);
   const [videoInputMode, setVideoInputMode] = useState<'link' | 'file'>('link');
@@ -425,17 +426,21 @@ export function App() {
   // Hydrate video when activeVideoModalPost opens
   useEffect(() => {
     if (activeVideoModalPost && activeVideoModalPost.id) {
-      if (!activeVideoModalPost.videoData && (activeVideoModalPost.hasStoredVideo || activeVideoModalPost.videoFileName)) {
-        loadVideoMedia(activeVideoModalPost.id).then((cached) => {
-          if (cached) {
-            setActiveVideoModalPost((prev) =>
-              prev && prev.id === activeVideoModalPost.id ? { ...prev, videoData: cached } : prev
-            );
-          }
-        });
-      }
+      const postId = activeVideoModalPost.id;
+      const fn = activeVideoModalPost.videoFileName;
+      loadVideoMedia(postId).then((cached) => {
+        if (cached) {
+          setActiveVideoModalPost((prev) => (prev && prev.id === postId ? { ...prev, videoData: cached } : prev));
+        } else if (fn) {
+          loadVideoMedia(fn).then((cachedFn) => {
+            if (cachedFn) {
+              setActiveVideoModalPost((prev) => (prev && prev.id === postId ? { ...prev, videoData: cachedFn } : prev));
+            }
+          });
+        }
+      });
     }
-  }, [activeVideoModalPost?.id]);
+  }, [activeVideoModalPost?.id, activeVideoModalPost?.videoFileName]);
 
   // Filtered posts based on active tab and search query - strictly excludes deleted posts
   const filteredPosts = useMemo(() => {
@@ -582,6 +587,7 @@ export function App() {
     setIsImageLoading(false);
     setFormVideoUrl('');
     setFormVideoData('');
+    setFormVideoFile(null);
     setFormVideoFileName('');
     setFormVideoFileSize(0);
     // Default to 'file' so smartphone and KakaoTalk video upload is immediately front-and-center
@@ -619,6 +625,7 @@ export function App() {
     setIsImageLoading(false);
     setFormVideoUrl(post.videoUrl || '');
     setFormVideoData(post.videoData || '');
+    setFormVideoFile(null);
     setFormVideoFileName(post.videoFileName || '');
     setFormVideoFileSize(post.videoFileSize || 0);
     setVideoInputMode(post.videoUrl ? 'link' : post.videoData ? 'file' : 'link');
@@ -680,22 +687,25 @@ export function App() {
       imageFileName: formImageFileName,
       imageFileSize: formImageFileSize,
       hasStoredImage: Boolean(formImageUrl),
-      videoUrl: formVideoUrl.trim() || undefined,
+      videoUrl: formVideoUrl.trim() || (formVideoFileName ? `/videos/${formVideoFileName}` : undefined),
       videoData: formVideoData,
       videoFileName: formVideoFileName,
       videoFileSize: formVideoFileSize,
-      hasStoredVideo: Boolean(formVideoData || formVideoUrl.trim()),
+      hasStoredVideo: Boolean(formVideoData || formVideoUrl.trim() || formVideoFileName),
       videoSourceType: formVideoUrl.trim()
         ? (formVideoUrl.includes('youtube') || formVideoUrl.includes('youtu.be')
             ? 'youtube'
-            : formVideoUrl.startsWith('/videos/')
-            ? 'file'
-            : 'link')
-        : formVideoData ? 'file' : undefined
+            : 'file')
+        : formVideoFileName ? 'file' : undefined
     };
 
     // Store in IndexedDB for reliable high-capacity video & photo persistence
-    if (formVideoData) {
+    if (formVideoFile) {
+      await storeVideoMedia(newPostId, formVideoFile, formVideoFile.name, formVideoFile.type, formVideoFile.size);
+      if (formVideoFileName) {
+        await storeVideoMedia(formVideoFileName, formVideoFile, formVideoFile.name, formVideoFile.type, formVideoFile.size);
+      }
+    } else if (formVideoData && !formVideoData.startsWith('blob:')) {
       await storeVideoMedia(newPostId, formVideoData, formVideoFileName, undefined, formVideoFileSize);
     }
     if (formImageUrl) {
@@ -734,13 +744,16 @@ export function App() {
       const firestoreDoc: Record<string, any> = {};
       Object.entries(payload).forEach(([k, v]) => {
         if (v !== undefined) {
-          if (k === 'videoData' && typeof v === 'string' && v.length > 750000) {
+          if (k === 'videoData' && typeof v === 'string' && (v.length > 750000 || v.startsWith('blob:'))) {
             firestoreDoc[k] = '';
           } else {
             firestoreDoc[k] = v;
           }
         }
       });
+      if (!firestoreDoc.videoUrl && formVideoFileName) {
+        firestoreDoc.videoUrl = `/videos/${formVideoFileName}`;
+      }
       setDoc(doc(db, 'posts', editingPostId), firestoreDoc).catch((err) => {
         handleFirestoreError(err, OperationType.UPDATE, `posts/${editingPostId}`);
       });
@@ -757,13 +770,16 @@ export function App() {
       const firestoreDoc: Record<string, any> = {};
       Object.entries(payload).forEach(([k, v]) => {
         if (v !== undefined) {
-          if (k === 'videoData' && typeof v === 'string' && v.length > 750000) {
+          if (k === 'videoData' && typeof v === 'string' && (v.length > 750000 || v.startsWith('blob:'))) {
             firestoreDoc[k] = '';
           } else {
             firestoreDoc[k] = v;
           }
         }
       });
+      if (!firestoreDoc.videoUrl && formVideoFileName) {
+        firestoreDoc.videoUrl = `/videos/${formVideoFileName}`;
+      }
       setDoc(doc(db, 'posts', newPostId), firestoreDoc).catch((err) => {
         handleFirestoreError(err, OperationType.CREATE, `posts/${newPostId}`);
       });
@@ -1092,9 +1108,17 @@ export function App() {
       return;
     }
 
-    setIsVideoLoading(true);
+    // 0. Instantly generate a local in-memory Blob URL for zero-delay instant preview
+    const instantBlobUrl = URL.createObjectURL(file);
+    setFormVideoFile(file);
+    setFormVideoData(instantBlobUrl);
     setFormVideoFileName(file.name);
     setFormVideoFileSize(file.size);
+    setIsVideoLoading(true);
+
+    // Stage in IndexedDB immediately for both temp key and original file name
+    storeVideoMedia('temp_latest_video', file, file.name, file.type, file.size);
+    storeVideoMedia(file.name, file, file.name, file.type, file.size);
 
     const sizeMB = (file.size / (1024 * 1024)).toFixed(1);
 
@@ -1116,13 +1140,6 @@ export function App() {
           setFormVideoFileName(rawData.fileName || file.name);
           setIsVideoLoading(false);
           showToast(`🎉 동영상 [${file.name}] (${sizeMB}MB) 등록 완료! 모든 기기에서 즉시 재생됩니다.`, 'success');
-
-          // Cache preview data URL locally for instant offline preview
-          const reader = new FileReader();
-          reader.onload = () => {
-            if (typeof reader.result === 'string') setFormVideoData(reader.result);
-          };
-          reader.readAsDataURL(file);
           return;
         }
       }
@@ -1135,8 +1152,6 @@ export function App() {
     reader.onload = async () => {
       if (typeof reader.result === 'string') {
         const dataUrl = reader.result;
-        setFormVideoData(dataUrl);
-
         try {
           const res = await fetch('/api/upload-video', {
             method: 'POST',
@@ -1167,7 +1182,6 @@ export function App() {
     };
     reader.onerror = () => {
       setIsVideoLoading(false);
-      showToast('동영상 처리 중 오류가 발생했습니다.', 'error');
     };
     reader.readAsDataURL(file);
   };
@@ -1175,6 +1189,7 @@ export function App() {
   const handleRemoveVideo = () => {
     setFormVideoUrl('');
     setFormVideoData('');
+    setFormVideoFile(null);
     setFormVideoFileName('');
     setFormVideoFileSize(0);
     setIsVideoLoading(false);
@@ -1191,8 +1206,34 @@ export function App() {
     }
 
     const sizeMB = (file.size / (1024 * 1024)).toFixed(1);
-    showToast(`🎬 동영상 [${file.name}] (${sizeMB}MB) 서버 전송 및 싱크 작업 중...`, 'info');
+    showToast(`🎬 동영상 [${file.name}] (${sizeMB}MB) 싱크 및 재생 준비 중...`, 'info');
 
+    // 1. Instant local playback: create Object URL and save real File into IndexedDB
+    const localBlobUrl = URL.createObjectURL(file);
+    await storeVideoMedia(targetPost.id, file, file.name, file.type, file.size);
+    if (file.name) {
+      await storeVideoMedia(file.name, file, file.name, file.type, file.size);
+    }
+
+    const instantPatch = {
+      videoUrl: targetPost.videoUrl || `/videos/${file.name}`,
+      videoData: localBlobUrl,
+      videoFileName: file.name,
+      videoFileSize: file.size,
+      videoSourceType: 'file' as const,
+      hasStoredVideo: true,
+      lastUpdated: Date.now()
+    };
+
+    setPosts((prev) => prev.map((p) => (p.id === targetPost.id ? { ...p, ...instantPatch } : p)));
+    if (activeReaderPost && activeReaderPost.id === targetPost.id) {
+      setActiveReaderPost((prev) => (prev ? { ...prev, ...instantPatch } : null));
+    }
+    if (activeVideoModalPost && activeVideoModalPost.id === targetPost.id) {
+      setActiveVideoModalPost((prev) => (prev ? { ...prev, ...instantPatch } : null));
+    }
+
+    // 2. Binary upload to server for cross-device persistence
     try {
       const res = await fetch(`/api/posts/${targetPost.id}/video`, {
         method: 'POST',
@@ -1207,7 +1248,7 @@ export function App() {
         const data = await res.json();
         if (data.success && data.videoUrl) {
           const now = data.lastUpdated || Date.now();
-          const updatedPatch = {
+          const serverPatch = {
             videoUrl: data.videoUrl,
             videoFileName: file.name,
             videoFileSize: file.size,
@@ -1216,31 +1257,22 @@ export function App() {
             lastUpdated: now
           };
 
-          // Cache in IndexedDB for local instant playback
-          const reader = new FileReader();
-          reader.onload = () => {
-            if (typeof reader.result === 'string') {
-              storeVideoMedia(targetPost.id, reader.result, file.name, undefined, file.size);
-            }
-          };
-          reader.readAsDataURL(file);
-
-          // Update local posts state
+          // Update local posts state with server URL
           setPosts((prev) =>
-            prev.map((p) => (p.id === targetPost.id ? { ...p, ...updatedPatch } : p))
+            prev.map((p) => (p.id === targetPost.id ? { ...p, ...serverPatch } : p))
           );
 
           if (activeReaderPost && activeReaderPost.id === targetPost.id) {
-            setActiveReaderPost((prev) => (prev ? { ...prev, ...updatedPatch } : null));
+            setActiveReaderPost((prev) => (prev ? { ...prev, ...serverPatch } : null));
           }
 
           if (activeVideoModalPost && activeVideoModalPost.id === targetPost.id) {
-            setActiveVideoModalPost((prev) => (prev ? { ...prev, ...updatedPatch } : null));
+            setActiveVideoModalPost((prev) => (prev ? { ...prev, ...serverPatch } : null));
           }
 
           // Sync to Firebase Firestore for cloud persistence across all visitors
           const firestoreDoc: Record<string, any> = {
-            ...updatedPatch,
+            ...serverPatch,
             videoData: '' // Keep doc light, streaming is from videoUrl
           };
           updateDoc(doc(db, 'posts', targetPost.id), firestoreDoc).catch((err) => {
@@ -1252,7 +1284,7 @@ export function App() {
         }
       }
     } catch (err) {
-      console.error('Direct video sync error:', err);
+      console.warn('Direct video sync notice:', err);
     }
 
     showToast('동영상 싱크 처리 중 오류가 발생했습니다. 다시 시도해주세요.', 'error');
@@ -2239,6 +2271,7 @@ export function App() {
                     </div>
                   </div>
                   <VideoPlayer
+                    postId={activeReaderPost.id}
                     videoUrl={activeReaderPost.videoUrl}
                     videoData={activeReaderPost.videoData}
                     videoFileName={activeReaderPost.videoFileName}
@@ -2437,6 +2470,7 @@ export function App() {
             <div className="p-3 sm:p-5 overflow-y-auto space-y-4">
               <div className="rounded-2xl overflow-hidden bg-black border border-slate-800 shadow-2xl">
                 <VideoPlayer
+                  postId={activeVideoModalPost.id}
                   videoUrl={activeVideoModalPost.videoUrl}
                   videoData={activeVideoModalPost.videoData}
                   videoFileName={activeVideoModalPost.videoFileName}

@@ -108,14 +108,35 @@ async function startServer() {
       let filePath = path.join(videosDir, filename);
 
       if (!fs.existsSync(filePath)) {
-        // Check dist/videos if in production
+        // 1. Check dist/videos if in production
         const distFilePath = path.join(__dirname, 'dist', 'videos', filename);
         if (fs.existsSync(distFilePath)) {
           filePath = distFilePath;
         } else {
-          // If file is not found, return 404 cleanly so UI knows it needs sync, never hijack with wrong video
-          res.status(404).json({ success: false, message: `Video not found on server: ${filename}` });
-          return;
+          // 2. Search if any file in videosDir contains or matches the filename (e.g. prefix wongok_... or suffix)
+          let matched: string | null = null;
+          try {
+            const allFiles = fs.readdirSync(videosDir);
+            const cleanTarget = filename.replace(/^wongok_\d+_[a-z0-9]+_/i, '');
+            const found = allFiles.find(
+              (f) =>
+                f === filename ||
+                f === cleanTarget ||
+                f.endsWith('_' + cleanTarget) ||
+                f.endsWith(filename) ||
+                f.includes(cleanTarget)
+            );
+            if (found) {
+              matched = path.join(videosDir, found);
+            }
+          } catch {}
+
+          if (matched && fs.existsSync(matched)) {
+            filePath = matched;
+          } else {
+            res.status(404).send('Video not found');
+            return;
+          }
         }
       }
 
@@ -385,6 +406,12 @@ async function startServer() {
 
       fs.writeFileSync(filePath, buffer);
 
+      if (fileName && fileName !== 'video.mp4') {
+        try {
+          fs.writeFileSync(path.join(videosDir, fileName), buffer);
+        } catch (e) {}
+      }
+
       // Also ensure dist/videos has it if running in prod
       const distVideosDir = path.join(__dirname, 'dist', 'videos');
       if (fs.existsSync(path.join(__dirname, 'dist'))) {
@@ -392,6 +419,11 @@ async function startServer() {
           fs.mkdirSync(distVideosDir, { recursive: true });
         }
         fs.writeFileSync(path.join(distVideosDir, uniqueFileName), buffer);
+        if (fileName && fileName !== 'video.mp4') {
+          try {
+            fs.writeFileSync(path.join(distVideosDir, fileName), buffer);
+          } catch (e) {}
+        }
       }
 
       const videoUrl = `/videos/${uniqueFileName}`;

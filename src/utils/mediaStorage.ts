@@ -65,29 +65,92 @@ export async function storeVideoMedia(
 }
 
 /**
- * Retrieve video or media data URL / Object URL from IndexedDB by post ID
+ * Retrieve video or media data URL / Object URL from IndexedDB by post ID or fileName
  */
-export async function loadVideoMedia(id: string): Promise<string | null> {
+export async function loadVideoMedia(idOrFileName: string): Promise<string | null> {
+  if (!idOrFileName) return null;
   try {
     const db = await openDB();
     return new Promise((resolve) => {
       const tx = db.transaction(STORE_NAME, 'readonly');
       const store = tx.objectStore(STORE_NAME);
-      const req = store.get(id);
+      const req = store.get(idOrFileName);
       req.onsuccess = () => {
         if (req.result && req.result.data) {
           const rawData = req.result.data;
-          if (typeof rawData === 'string') {
-            resolve(rawData);
-          } else if (rawData instanceof Blob) {
+          if (rawData instanceof Blob) {
             try {
               resolve(URL.createObjectURL(rawData));
+              return;
             } catch {
               resolve(null);
+              return;
             }
-          } else {
-            resolve(null);
+          } else if (typeof rawData === 'string') {
+            // Expired blob: URLs from previous sessions must not be returned
+            if (rawData.startsWith('blob:')) {
+              resolve(null);
+              return;
+            }
+            resolve(rawData);
+            return;
           }
+        }
+
+        // Secondary fallback: scan store for record with matching fileName
+        try {
+          const cursorReq = store.openCursor();
+          cursorReq.onsuccess = (e: any) => {
+            const cursor = e.target.result;
+            if (cursor) {
+              const val = cursor.value;
+              if (
+                val &&
+                (val.fileName === idOrFileName ||
+                  val.id === idOrFileName ||
+                  (idOrFileName.includes('/') && val.fileName && idOrFileName.endsWith(val.fileName)))
+              ) {
+                if (val.data instanceof Blob) {
+                  try {
+                    resolve(URL.createObjectURL(val.data));
+                    return;
+                  } catch {}
+                } else if (typeof val.data === 'string' && !val.data.startsWith('blob:')) {
+                  resolve(val.data);
+                  return;
+                }
+              }
+              cursor.continue();
+            } else {
+              resolve(null);
+            }
+          };
+          cursorReq.onerror = () => resolve(null);
+        } catch {
+          resolve(null);
+        }
+      };
+      req.onerror = () => resolve(null);
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Retrieve the actual binary Blob from IndexedDB
+ */
+export async function loadVideoBlob(idOrFileName: string): Promise<Blob | null> {
+  if (!idOrFileName) return null;
+  try {
+    const db = await openDB();
+    return new Promise((resolve) => {
+      const tx = db.transaction(STORE_NAME, 'readonly');
+      const store = tx.objectStore(STORE_NAME);
+      const req = store.get(idOrFileName);
+      req.onsuccess = () => {
+        if (req.result && req.result.data instanceof Blob) {
+          resolve(req.result.data);
         } else {
           resolve(null);
         }
