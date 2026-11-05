@@ -229,6 +229,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       videoRef.current.requestFullscreen();
     } else if ((videoRef.current as any).webkitRequestFullscreen) {
       (videoRef.current as any).webkitRequestFullscreen();
+    } else if ((videoRef.current as any).webkitEnterFullscreen) {
+      (videoRef.current as any).webkitEnterFullscreen();
     }
   };
 

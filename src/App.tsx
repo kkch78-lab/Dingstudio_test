@@ -1547,7 +1547,7 @@ export function App() {
   };
 
   return (
-    <div id="wongok-sports-app" className="min-h-screen bg-slate-50 flex flex-col text-slate-900 selection:bg-rose-500 selection:text-white">
+    <div id="wongok-sports-app" className="min-h-screen bg-slate-50 flex flex-col text-slate-900 selection:bg-rose-500 selection:text-white pb-16 md:pb-0">
       {/* HUD Floating Toast Notification */}
       {toast && (
         <div
@@ -2396,7 +2396,7 @@ export function App() {
             onClick={(e) => e.stopPropagation()}
           >
             {/* Top Bar */}
-            <div className="p-4 sm:p-5 pb-3 flex items-start justify-between gap-4 border-b border-slate-800 bg-slate-950/90 text-white">
+            <div className="p-3.5 sm:p-5 pb-3 flex flex-col sm:flex-row sm:items-start justify-between gap-3 sm:gap-4 border-b border-slate-800 bg-slate-950/90 text-white">
               <div>
                 <div className="flex items-center gap-2 mb-1.5">
                   <span className="px-2.5 py-0.5 rounded-full bg-rose-500/20 text-rose-400 border border-rose-500/30 text-[10px] font-bold">
@@ -2415,7 +2415,7 @@ export function App() {
                   {activeVideoModalPost.title}
                 </h3>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1.5 flex-wrap sm:flex-nowrap shrink-0">
                 <button
                   type="button"
                   onClick={(e) => {
@@ -3424,6 +3424,78 @@ export function App() {
           </div>
         </div>
       </footer>
+
+      {/* 📱 Mobile Fixed Quick Bottom Navigation Bar for Smartphones */}
+      <div className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-slate-200 px-3 py-1.5 shadow-lg flex items-center justify-around safe-area-inset-bottom">
+        <button
+          type="button"
+          onClick={() => {
+            setCurrentTab('home');
+            setSearchQuery('');
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+          }}
+          className={`flex flex-col items-center gap-0.5 py-1 px-2 rounded-xl transition-colors ${
+            currentTab === 'home' ? 'text-emerald-800 font-extrabold' : 'text-slate-500 hover:text-slate-800'
+          }`}
+        >
+          <Sparkles className="w-5 h-5" />
+          <span className="text-[10px]">종합마당</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => {
+            setCurrentTab('club');
+            setSearchQuery('');
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+          }}
+          className={`flex flex-col items-center gap-0.5 py-1 px-2 rounded-xl transition-colors ${
+            currentTab === 'club' ? 'text-emerald-800 font-extrabold' : 'text-slate-500 hover:text-slate-800'
+          }`}
+        >
+          <Trophy className="w-5 h-5" />
+          <span className="text-[10px]">스포츠클럽</span>
+        </button>
+
+        {/* Center Floating Action Button (New Post) */}
+        <button
+          type="button"
+          onClick={() => openAddPost()}
+          className="flex flex-col items-center -mt-5"
+          title="소식/자료/영상 등록"
+        >
+          <div className="w-12 h-12 rounded-full bg-rose-600 hover:bg-rose-500 text-white flex items-center justify-center shadow-lg shadow-rose-300 transition-transform active:scale-95">
+            <CirclePlus className="w-6 h-6 stroke-[2.5]" />
+          </div>
+          <span className="text-[10px] font-bold text-rose-600 mt-0.5">등록</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => {
+            setCurrentTab('oasis');
+            setSearchQuery('');
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+          }}
+          className={`flex flex-col items-center gap-0.5 py-1 px-2 rounded-xl transition-colors ${
+            currentTab === 'oasis' ? 'text-rose-600 font-extrabold' : 'text-slate-500 hover:text-slate-800'
+          }`}
+        >
+          <Zap className="w-5 h-5" />
+          <span className="text-[10px]">원곡 릴스</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setIsAuthModalOpen(true)}
+          className={`flex flex-col items-center gap-0.5 py-1 px-2 rounded-xl transition-colors ${
+            isManager ? 'text-amber-600 font-extrabold' : 'text-slate-500 hover:text-slate-800'
+          }`}
+        >
+          {isManager ? <Shield className="w-5 h-5 text-amber-500" /> : <Lock className="w-5 h-5" />}
+          <span className="text-[10px]">{isManager ? '운영진' : '인증'}</span>
+        </button>
+      </div>
     </div>
   );
 }
