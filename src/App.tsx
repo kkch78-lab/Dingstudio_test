@@ -749,12 +749,20 @@ export function App() {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
-      }).catch(() => {});
+      })
+        .then((res) => res.json())
+        .then((data) => {
+          if (data && data.success && data.post) {
+            setPosts((prev) => prev.map((p) => (p.id === editingPostId ? { ...p, ...data.post } : p)));
+          }
+        })
+        .catch(() => {});
+
       // 🚀 Save to Firebase Firestore (Instant PC ↔ Mobile sync)
       const firestoreDoc: Record<string, any> = {};
       Object.entries(payload).forEach(([k, v]) => {
         if (v !== undefined) {
-          if (k === 'videoData' && typeof v === 'string' && (v.length > 750000 || v.startsWith('blob:'))) {
+          if (k === 'videoData' && typeof v === 'string' && (v.length > 500000 || v.startsWith('blob:'))) {
             firestoreDoc[k] = '';
           } else {
             firestoreDoc[k] = v;
@@ -775,12 +783,20 @@ export function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
-      }).catch(() => {});
+      })
+        .then((res) => res.json())
+        .then((data) => {
+          if (data && data.success && data.post) {
+            setPosts((prev) => prev.map((p) => (p.id === newPostId ? { ...p, ...data.post } : p)));
+          }
+        })
+        .catch(() => {});
+
       // 🚀 Save to Firebase Firestore (Instant PC ↔ Mobile sync)
       const firestoreDoc: Record<string, any> = {};
       Object.entries(payload).forEach(([k, v]) => {
         if (v !== undefined) {
-          if (k === 'videoData' && typeof v === 'string' && (v.length > 750000 || v.startsWith('blob:'))) {
+          if (k === 'videoData' && typeof v === 'string' && (v.length > 500000 || v.startsWith('blob:'))) {
             firestoreDoc[k] = '';
           } else {
             firestoreDoc[k] = v;

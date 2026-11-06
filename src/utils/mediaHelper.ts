@@ -24,15 +24,19 @@ export function parseVideoMedia(urlOrData?: string, videoData?: string, fileName
       urlOrData.startsWith('https://'))
   ) {
     raw = urlOrData.trim();
-  } else if (videoData && videoData.trim()) {
-    raw = videoData.trim();
-  } else if (urlOrData && urlOrData.trim()) {
-    raw = urlOrData.trim();
   } else if (fileName && fileName.trim()) {
     const fn = fileName.trim();
     if (/\.(mp4|mov|webm|m4v|3gp|mkv|avi)$/i.test(fn)) {
       raw = `/videos/${fn}`;
     }
+  } else if (urlOrData && urlOrData.trim() && !urlOrData.startsWith('blob:')) {
+    raw = urlOrData.trim();
+  } else if (videoData && videoData.trim() && !videoData.startsWith('blob:')) {
+    raw = videoData.trim();
+  } else if (videoData && videoData.trim()) {
+    raw = videoData.trim();
+  } else if (urlOrData && urlOrData.trim()) {
+    raw = urlOrData.trim();
   }
 
   if (!raw) {

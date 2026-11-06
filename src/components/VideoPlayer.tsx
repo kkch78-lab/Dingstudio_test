@@ -33,23 +33,32 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
   // Compute the optimal initial playback source
   const getInitialSrc = useCallback((): string => {
-    // 1. If in-memory blob: or data: URL is provided, it is 100% playable locally
+    // 1. Explicit server or web videoUrl is universal across all devices (PC & Mobile)
+    if (
+      videoUrl &&
+      (videoUrl.startsWith('/videos/') ||
+        videoUrl.startsWith('./videos/') ||
+        videoUrl.startsWith('http://') ||
+        videoUrl.startsWith('https://'))
+    ) {
+      return videoUrl.trim();
+    }
+    // 2. videoFileName on server
+    if (videoFileName && videoFileName.trim() && !videoFileName.startsWith('blob:')) {
+      return `/videos/${videoFileName.trim()}`;
+    }
+    // 3. Parsed media src (e.g. YouTube embed, Vimeo, etc.)
+    if (media.src && media.type !== 'none' && !media.src.startsWith('blob:')) {
+      return media.src;
+    }
+    // 4. In-memory blob: or data: URL (Only on local machine where file was selected, or embedded data)
     if (videoData && (videoData.startsWith('blob:') || videoData.startsWith('data:'))) {
       return videoData;
     }
-    // 2. Explicit videoUrl
+    // 5. Fallbacks
     if (videoUrl && videoUrl.trim()) {
       return videoUrl.trim();
     }
-    // 3. Parsed media src (e.g. /videos/..., YouTube embed, etc.)
-    if (media.src && media.type !== 'none') {
-      return media.src;
-    }
-    // 4. videoFileName on server
-    if (videoFileName && videoFileName.trim()) {
-      return `/videos/${videoFileName.trim()}`;
-    }
-    // 5. Raw videoData
     if (videoData && videoData.trim()) {
       return videoData.trim();
     }

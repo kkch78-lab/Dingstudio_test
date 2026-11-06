@@ -10,6 +10,89 @@ const __dirname = path.dirname(__filename);
 const DATA_FILE = path.join(__dirname, 'server-posts.json');
 const DELETED_DATA_FILE = path.join(__dirname, 'server-deleted-posts.json');
 
+const videosDir = path.join(__dirname, 'public', 'videos');
+const imagesDir = path.join(__dirname, 'public', 'images');
+
+try {
+  if (!fs.existsSync(videosDir)) fs.mkdirSync(videosDir, { recursive: true });
+  if (!fs.existsSync(imagesDir)) fs.mkdirSync(imagesDir, { recursive: true });
+} catch (e) {}
+
+// Normalize post media so that uploads from phone or PC become permanent static files
+function normalizePostMedia(p: any) {
+  if (!p) return p;
+
+  // 1. Process Image: Convert base64 data URLs to static /images/ files on disk
+  if (p.imageUrl && typeof p.imageUrl === 'string' && p.imageUrl.startsWith('data:image/')) {
+    try {
+      const match = p.imageUrl.match(/^data:image\/([a-zA-Z0-9+]+);base64,(.+)$/);
+      if (match) {
+        let ext = '.' + match[1].toLowerCase();
+        if (ext === '.jpeg') ext = '.jpg';
+        const buffer = Buffer.from(match[2], 'base64');
+        const cleanName = (p.imageFileName || 'image').replace(/[^a-zA-Z0-9_-]/g, '_');
+        const uniqueFileName = `wongok_img_${Date.now()}_${Math.random().toString(36).substring(2, 7)}_${cleanName}${ext}`;
+        const filePath = path.join(imagesDir, uniqueFileName);
+        fs.writeFileSync(filePath, buffer);
+
+        const distImagesDir = path.join(__dirname, 'dist', 'images');
+        if (fs.existsSync(path.join(__dirname, 'dist'))) {
+          if (!fs.existsSync(distImagesDir)) fs.mkdirSync(distImagesDir, { recursive: true });
+          fs.writeFileSync(path.join(distImagesDir, uniqueFileName), buffer);
+        }
+
+        p.imageUrl = `/images/${uniqueFileName}`;
+        p.imageFileName = uniqueFileName;
+        p.hasStoredImage = true;
+      }
+    } catch (imgErr) {
+      console.warn('Error converting post base64 image to file:', imgErr);
+    }
+  }
+
+  // 2. Process Video: Strip transient browser-local blob: URLs so other devices never fail on a dead blob
+  if (p.videoData && typeof p.videoData === 'string' && p.videoData.startsWith('blob:')) {
+    p.videoData = '';
+  }
+
+  // 3. If base64 videoData is received, save to disk as a static /videos/ file
+  if (p.videoData && typeof p.videoData === 'string' && p.videoData.startsWith('data:video/')) {
+    try {
+      const match = p.videoData.match(/^data:video\/([a-zA-Z0-9+]+);base64,(.+)$/);
+      if (match) {
+        let ext = '.' + match[1].toLowerCase();
+        if (ext === '.quicktime') ext = '.mov';
+        const buffer = Buffer.from(match[2], 'base64');
+        const cleanName = (p.videoFileName || 'video').replace(/[^a-zA-Z0-9_-]/g, '_');
+        const uniqueFileName = `wongok_${Date.now()}_${Math.random().toString(36).substring(2, 7)}_${cleanName}${ext}`;
+        const filePath = path.join(videosDir, uniqueFileName);
+        fs.writeFileSync(filePath, buffer);
+
+        const distVideosDir = path.join(__dirname, 'dist', 'videos');
+        if (fs.existsSync(path.join(__dirname, 'dist'))) {
+          if (!fs.existsSync(distVideosDir)) fs.mkdirSync(distVideosDir, { recursive: true });
+          fs.writeFileSync(path.join(distVideosDir, uniqueFileName), buffer);
+        }
+
+        p.videoUrl = `/videos/${uniqueFileName}`;
+        p.videoFileName = uniqueFileName;
+        p.videoData = '';
+        p.hasStoredVideo = true;
+      }
+    } catch (vidErr) {
+      console.warn('Error converting post base64 video to file:', vidErr);
+    }
+  }
+
+  // 4. Ensure videoUrl points to /videos/ if videoFileName exists
+  if ((!p.videoUrl || p.videoUrl.startsWith('blob:')) && p.videoFileName) {
+    p.videoUrl = `/videos/${p.videoFileName}`;
+    p.hasStoredVideo = true;
+  }
+
+  return p;
+}
+
 // Read set of permanently deleted post IDs
 function getDeletedPostIds(): Set<string> {
   try {
@@ -46,17 +129,18 @@ function getStoredPosts() {
         return parsed
           .filter((p: any) => !p.isDeleted && !deletedIds.has(p.id))
           .map((p: any) => {
-            let ts = typeof p.lastUpdated === 'number' && !isNaN(p.lastUpdated) && p.lastUpdated > 0 ? p.lastUpdated : 0;
-            if (!ts && p.id && typeof p.id === 'string') {
-              const m = p.id.match(/^post_(\d{10,13})/);
+            const normalized = normalizePostMedia({ ...p });
+            let ts = typeof normalized.lastUpdated === 'number' && !isNaN(normalized.lastUpdated) && normalized.lastUpdated > 0 ? normalized.lastUpdated : 0;
+            if (!ts && normalized.id && typeof normalized.id === 'string') {
+              const m = normalized.id.match(/^post_(\d{10,13})/);
               if (m) ts = parseInt(m[1], 10);
             }
-            if (!ts && p.date) {
-              const d = new Date(p.date).getTime();
+            if (!ts && normalized.date) {
+              const d = new Date(normalized.date).getTime();
               if (!isNaN(d) && d > 0) ts = d;
             }
             if (!ts) ts = Date.now();
-            return { ...p, lastUpdated: ts };
+            return { ...normalized, lastUpdated: ts };
           });
       }
       return parsed;
@@ -84,22 +168,14 @@ async function startServer() {
   const isProd = process.env.NODE_ENV === 'production';
 
   // Direct Raw Binary Video Upload middleware (must be before urlencoded/json)
-  app.use('/api/upload-video-raw', express.raw({ type: '*/*', limit: '100mb' }));
-  app.use('/api/posts/:id/video', express.raw({ type: '*/*', limit: '100mb' }));
+  app.use('/api/upload-video-raw', express.raw({ type: '*/*', limit: '200mb' }));
+  app.use('/api/posts/:id/video', express.raw({ type: '*/*', limit: '200mb' }));
 
   // Body parser with high limit for photos and short videos
-  app.use(express.json({ limit: '100mb' }));
-  app.use(express.urlencoded({ extended: true, limit: '100mb' }));
+  app.use(express.json({ limit: '200mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '200mb' }));
 
   // Static and Streaming routes for uploaded videos
-  const videosDir = path.join(__dirname, 'public', 'videos');
-  if (!fs.existsSync(videosDir)) {
-    try {
-      fs.mkdirSync(videosDir, { recursive: true });
-    } catch (e) {
-      console.warn('Could not create videos directory:', e);
-    }
-  }
 
   // Resilient Video Streaming Route with Range Request (HTTP 206) support for iOS Safari, Android Chrome & KakaoTalk
   app.get('/videos/:filename', (req, res, next) => {
@@ -191,14 +267,6 @@ async function startServer() {
   app.use('/videos', express.static(videosDir));
 
   // Static route for uploaded photos/images
-  const imagesDir = path.join(__dirname, 'public', 'images');
-  if (!fs.existsSync(imagesDir)) {
-    try {
-      fs.mkdirSync(imagesDir, { recursive: true });
-    } catch (e) {
-      console.warn('Could not create images directory:', e);
-    }
-  }
   app.use('/images', express.static(imagesDir));
 
   // Photo Upload API: Saves uploaded photo files to /public/images for fast permanent display across all devices
@@ -448,7 +516,7 @@ async function startServer() {
 
   app.post('/api/posts', (req, res) => {
     try {
-      const newPost = req.body;
+      let newPost = req.body;
       if (!newPost || !newPost.id) {
         res.status(400).json({ success: false, message: 'Invalid post data' });
         return;
@@ -469,6 +537,8 @@ async function startServer() {
         res.status(403).json({ success: false, message: 'This post has been permanently deleted by an administrator.' });
         return;
       }
+
+      newPost = normalizePostMedia(newPost);
 
       const incomingTs = typeof newPost.lastUpdated === 'number' && !isNaN(newPost.lastUpdated) && newPost.lastUpdated > 0
         ? newPost.lastUpdated
@@ -522,7 +592,7 @@ async function startServer() {
   app.put('/api/posts/:id', (req, res) => {
     try {
       const { id } = req.params;
-      const updatedData = req.body;
+      let updatedData = req.body;
 
       // Handle soft delete through PUT
       if (updatedData.isDeleted) {
@@ -534,6 +604,8 @@ async function startServer() {
         res.json({ success: true, deleted: true });
         return;
       }
+
+      updatedData = normalizePostMedia(updatedData);
 
       const incomingTs = typeof updatedData.lastUpdated === 'number' && !isNaN(updatedData.lastUpdated) && updatedData.lastUpdated > 0
         ? updatedData.lastUpdated
