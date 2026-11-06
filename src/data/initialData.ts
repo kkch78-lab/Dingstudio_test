@@ -535,7 +535,7 @@ export const INITIAL_POSTS: Post[] = [
     "videoSourceType": "file",
     "lastUpdated": 1793837767962,
     "hasStoredVideo": true,
-    "videoFileSize": 24426438,
+    "videoFileSize": 2528103,
     "imageUrl": "",
     "fileUrl": "",
     "imageFileName": "",
@@ -559,7 +559,7 @@ export const INITIAL_POSTS: Post[] = [
     "imageUrl": "",
     "hasStoredVideo": true,
     "fileUrl": "",
-    "videoFileSize": 2711011,
+    "videoFileSize": 4096783,
     "fileData": "",
     "imageFileSize": 0,
     "imageFileName": "",
@@ -616,7 +616,9 @@ export const INITIAL_POSTS: Post[] = [
     "videoData": "/videos/wongok_reels_jump_shot.mp4",
     "videoFileName": "wongok_reels_jump_shot.mp4",
     "videoSourceType": "file",
-    "lastUpdated": 1788066000000
+    "lastUpdated": 1788066000000,
+    "videoFileSize": 170792,
+    "hasStoredVideo": true
   },
   {
     "id": "post-5",
@@ -643,7 +645,9 @@ export const INITIAL_POSTS: Post[] = [
     "videoData": "/videos/_talkv_dJMcakGVCYv_C9gz0Xh0OIROTHMgEx1HCk_talkv_high.mp4",
     "videoFileName": "_talkv_dJMcakGVCYv_C9gz0Xh0OIROTHMgEx1HCk_talkv_high.mp4",
     "videoSourceType": "file",
-    "lastUpdated": 1793182172324
+    "lastUpdated": 1793182172324,
+    "videoFileSize": 1672322,
+    "hasStoredVideo": true
   }
 ];
 

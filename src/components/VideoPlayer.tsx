@@ -1,7 +1,19 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { parseVideoMedia } from '../utils/mediaHelper';
 import { loadVideoMedia } from '../utils/mediaStorage';
-import { Play, Pause, ArrowUpRight, Film, Download, RefreshCw, Maximize, Upload, Sparkles, CheckCircle2 } from 'lucide-react';
+import {
+  Play,
+  Pause,
+  ArrowUpRight,
+  Film,
+  Download,
+  Maximize,
+  Upload,
+  Volume2,
+  VolumeX,
+  CheckCircle2,
+  Sparkles
+} from 'lucide-react';
 
 interface VideoPlayerProps {
   postId?: string;
@@ -31,9 +43,13 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const media = parseVideoMedia(videoUrl, videoData, videoFileName);
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
-  // Compute the optimal initial playback source
-  const getInitialSrc = useCallback((): string => {
-    // 1. Explicit server or web videoUrl is universal across all devices (PC & Mobile)
+  // Compute pristine playback source
+  const computeSource = useCallback((): string => {
+    // 1. Fresh local in-memory Blob URL for current user session upload
+    if (videoData && videoData.startsWith('blob:')) {
+      return videoData;
+    }
+    // 2. Direct server URL (/videos/...)
     if (
       videoUrl &&
       (videoUrl.startsWith('/videos/') ||
@@ -43,167 +59,72 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     ) {
       return videoUrl.trim();
     }
-    // 2. videoFileName on server
+    // 3. Server URL from videoFileName
     if (videoFileName && videoFileName.trim() && !videoFileName.startsWith('blob:')) {
       return `/videos/${videoFileName.trim()}`;
     }
-    // 3. Parsed media src (e.g. YouTube embed, Vimeo, etc.)
+    // 4. Parsed media src (e.g. YouTube embed, external MP4)
     if (media.src && media.type !== 'none' && !media.src.startsWith('blob:')) {
       return media.src;
     }
-    // 4. In-memory blob: or data: URL (Only on local machine where file was selected, or embedded data)
-    if (videoData && (videoData.startsWith('blob:') || videoData.startsWith('data:'))) {
-      return videoData;
-    }
-    // 5. Fallbacks
-    if (videoUrl && videoUrl.trim()) {
-      return videoUrl.trim();
-    }
-    if (videoData && videoData.trim()) {
-      return videoData.trim();
-    }
+    // 5. Fallback URL
+    if (videoUrl && videoUrl.trim()) return videoUrl.trim();
+    if (videoData && videoData.trim()) return videoData.trim();
     return '';
   }, [media.src, media.type, videoUrl, videoData, videoFileName]);
 
-  const [currentSrc, setCurrentSrc] = useState<string>(getInitialSrc);
+  const [currentSrc, setCurrentSrc] = useState<string>(computeSource);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
-  const [retryCount, setRetryCount] = useState<number>(0);
-  const [isRecovering, setIsRecovering] = useState<boolean>(false);
-  const [hasPlaybackError, setHasPlaybackError] = useState<boolean>(false);
+  const [isMuted, setIsMuted] = useState<boolean>(true);
 
-  // Initial check: if currentSrc is empty or needs IndexedDB hydration
+  // Sync currentSrc when props update
+  useEffect(() => {
+    const next = computeSource();
+    if (next && next !== currentSrc) {
+      setCurrentSrc(next);
+      setIsPlaying(false);
+    }
+  }, [computeSource]);
+
+  // IndexedDB Hydration for offline/local storage
   useEffect(() => {
     let isSubscribed = true;
-    const hydrateFromStorage = async () => {
-      // If we don't have a direct blob/data URL, check IndexedDB first for high-quality local binary
+    const checkLocalCache = async () => {
       if (!currentSrc || (!currentSrc.startsWith('blob:') && !currentSrc.startsWith('data:'))) {
-        if (postId) {
-          const cached = await loadVideoMedia(postId);
-          if (cached && isSubscribed) {
-            setCurrentSrc(cached);
-            setHasPlaybackError(false);
-            return;
-          }
-        }
-        if (videoFileName) {
-          const cached = await loadVideoMedia(videoFileName);
-          if (cached && isSubscribed) {
-            setCurrentSrc(cached);
-            setHasPlaybackError(false);
-            return;
-          }
+        const key = postId || videoFileName;
+        if (key) {
+          try {
+            const cached = await loadVideoMedia(key);
+            if (cached && isSubscribed) {
+              setCurrentSrc(cached);
+            }
+          } catch {}
         }
       }
     };
-    hydrateFromStorage();
+    checkLocalCache();
     return () => {
       isSubscribed = false;
     };
   }, [postId, videoFileName]);
 
-  // Sync state whenever props change
-  useEffect(() => {
-    const next = getInitialSrc();
-    if (next && next !== currentSrc) {
-      setCurrentSrc(next);
-      setRetryCount(0);
-      setIsPlaying(false);
-      setHasPlaybackError(false);
-      if (videoRef.current) {
-        videoRef.current.load();
-      }
-    }
-  }, [getInitialSrc]);
-
-  // Attempt natural playback on mount or when autoPlay is requested
+  // Safe autoplay handler (starts muted to conform to iOS Safari and Android Chrome autoplay rules)
   useEffect(() => {
     if (autoPlay && videoRef.current && (media.type === 'html5' || !media.embedUrl)) {
       const v = videoRef.current;
-      v.play()
-        .then(() => setIsPlaying(true))
-        .catch(() => {
-          // Mute and retry if browser autoplay policy blocks unmuted audio
-          v.muted = true;
-          v.play()
-            .then(() => setIsPlaying(true))
-            .catch(() => {
-              // Gracefully waiting for user tap/click
-            });
-        });
+      v.muted = true;
+      setIsMuted(true);
+      const playPromise = v.play();
+      if (playPromise !== undefined) {
+        playPromise
+          .then(() => setIsPlaying(true))
+          .catch(() => {
+            // Autoplay blocked by browser policy; user can tap to play
+            setIsPlaying(false);
+          });
+      }
     }
   }, [autoPlay, currentSrc, media.type, media.embedUrl]);
-
-  // Smart cascade recovery if a video source encounters a playback or decoding error
-  // STRICT RULE: ONLY recover using data belonging to THIS video (never swap in another video!)
-  const handleVideoError = useCallback(async () => {
-    if (isRecovering) return;
-    setIsRecovering(true);
-
-    console.log(`[VideoPlayer] Auto-recovering playback for [${videoFileName || title || 'video'}], attempt: ${retryCount}`);
-
-    // Fallback 1: If local in-memory videoData exists and is valid, switch to it
-    if (videoData && currentSrc !== videoData && (videoData.startsWith('blob:') || videoData.startsWith('data:'))) {
-      setCurrentSrc(videoData);
-      setIsRecovering(false);
-      setRetryCount((prev) => prev + 1);
-      return;
-    }
-
-    // Fallback 2: Check IndexedDB by postId for the real binary blob
-    if (postId) {
-      try {
-        const cached = await loadVideoMedia(postId);
-        if (cached && cached !== currentSrc) {
-          setCurrentSrc(cached);
-          setIsRecovering(false);
-          setRetryCount((prev) => prev + 1);
-          return;
-        }
-      } catch {}
-    }
-
-    // Fallback 3: Check IndexedDB by videoFileName
-    if (videoFileName) {
-      try {
-        const cached = await loadVideoMedia(videoFileName);
-        if (cached && cached !== currentSrc) {
-          setCurrentSrc(cached);
-          setIsRecovering(false);
-          setRetryCount((prev) => prev + 1);
-          return;
-        }
-      } catch {}
-    }
-
-    // Fallback 4: If currentSrc is a server URL, fetch as Blob to bypass range-request / MIME quirks in mobile browsers
-    if (currentSrc && (currentSrc.startsWith('/videos/') || currentSrc.startsWith('http'))) {
-      try {
-        const res = await fetch(currentSrc);
-        if (res.ok) {
-          const blob = await res.blob();
-          if (blob && blob.size > 1000) {
-            const blobUrl = URL.createObjectURL(blob);
-            setCurrentSrc(blobUrl);
-            setIsRecovering(false);
-            setRetryCount((prev) => prev + 1);
-            return;
-          }
-        }
-      } catch {}
-    }
-
-    // Fallback 5: Try direct server streaming path for videoFileName
-    if (videoFileName && currentSrc !== `/videos/${videoFileName}`) {
-      setCurrentSrc(`/videos/${videoFileName}`);
-      setIsRecovering(false);
-      setRetryCount((prev) => prev + 1);
-      return;
-    }
-
-    // Never swap in another video! If exhausted, record error gracefully
-    setIsRecovering(false);
-    setHasPlaybackError(true);
-  }, [currentSrc, videoData, videoFileName, title, retryCount, isRecovering, postId]);
 
   const handlePlayToggle = (e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
@@ -215,13 +136,15 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
     if (videoRef.current.paused) {
       videoRef.current.muted = false;
+      setIsMuted(false);
       videoRef.current
         .play()
         .then(() => setIsPlaying(true))
         .catch(() => {
-          // Retry with muted if browser blocked audio gesture
+          // Fallback to muted playback if audio gesture is missing
           if (videoRef.current) {
             videoRef.current.muted = true;
+            setIsMuted(true);
             videoRef.current.play().then(() => setIsPlaying(true)).catch(() => {});
           }
         });
@@ -229,6 +152,14 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       videoRef.current.pause();
       setIsPlaying(false);
     }
+  };
+
+  const handleMuteToggle = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!videoRef.current) return;
+    const nextMuted = !videoRef.current.muted;
+    videoRef.current.muted = nextMuted;
+    setIsMuted(nextMuted);
   };
 
   const handleFullscreen = (e: React.MouseEvent) => {
@@ -282,7 +213,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   }
 
   // 2. Direct HTML5 Video Player (MP4 / WebM / MOV / KakaoTalk / Smartphone Videos)
-  // Always renders a fully interactive HTML5 video canvas with zero blocking errors
+  // Always renders a fully interactive HTML5 video canvas with ZERO blocking error screens
   const activePlaySrc = currentSrc || media.src || (videoFileName ? `/videos/${videoFileName}` : '');
 
   return (
@@ -296,13 +227,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             playsInline
             webkit-playsinline="true"
             x5-playsinline="true"
-            preload="metadata"
-            onPlay={() => {
-              setIsPlaying(true);
-              setHasPlaybackError(false);
-            }}
+            preload="auto"
+            muted={isMuted}
+            onPlay={() => setIsPlaying(true)}
             onPause={() => setIsPlaying(false)}
-            onError={handleVideoError}
             className={`w-full bg-black ${compact ? 'max-h-48 object-cover cursor-pointer' : 'max-h-[540px] object-contain'}`}
             onClick={compact ? handlePlayToggle : undefined}
           >
@@ -319,10 +247,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         )}
 
         {/* Big Center Play Button Overlay on Pause or Compact mode */}
-        {(!isPlaying || compact) && activePlaySrc && !hasPlaybackError && (
+        {(!isPlaying || compact) && activePlaySrc && (
           <div
             onClick={handlePlayToggle}
-            className="absolute inset-0 flex flex-col items-center justify-center bg-black/35 hover:bg-black/20 transition-all cursor-pointer pointer-events-auto"
+            className="absolute inset-0 flex flex-col items-center justify-center bg-black/30 hover:bg-black/15 transition-all cursor-pointer pointer-events-auto"
           >
             <div className="w-16 h-16 rounded-full bg-rose-600 hover:bg-rose-500 text-white flex items-center justify-center shadow-2xl transition-transform hover:scale-110 mb-2">
               <Play className="w-8 h-8 fill-white ml-1" />
@@ -331,44 +259,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               <Play className="w-3 h-3 fill-rose-400 text-rose-400" />
               <span>동영상 바로 시청하기</span>
             </span>
-          </div>
-        )}
-
-        {/* Playback Recovery Overlay if browser codec needs direct stream */}
-        {hasPlaybackError && !isPlaying && activePlaySrc && (
-          <div className="absolute inset-0 bg-slate-950/85 backdrop-blur-xs flex flex-col items-center justify-center p-4 text-center z-20">
-            <Film className="w-10 h-10 text-amber-400 mb-2" />
-            <h4 className="text-sm font-bold text-white mb-1">스마트폰/카카오톡 영상 재생</h4>
-            <p className="text-xs text-slate-300 max-w-sm mb-3">
-              기기 코덱에 맞춰 새 창에서 원본으로 바로 시청하시거나 재생을 다시 시도하실 수 있습니다.
-            </p>
-            <div className="flex flex-wrap items-center justify-center gap-2">
-              <button
-                type="button"
-                onClick={() => {
-                  setHasPlaybackError(false);
-                  if (videoRef.current) {
-                    videoRef.current.load();
-                    videoRef.current.play().catch(() => {});
-                  }
-                }}
-                className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold flex items-center gap-1.5 border border-slate-700"
-              >
-                <RefreshCw className="w-3.5 h-3.5" />
-                <span>재생 다시 시도</span>
-              </button>
-              {directLinkUrl && (
-                <a
-                  href={directLinkUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="px-3.5 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm"
-                >
-                  <ArrowUpRight className="w-3.5 h-3.5" />
-                  <span>새 창에서 바로 재생</span>
-                </a>
-              )}
-            </div>
           </div>
         )}
       </div>
@@ -405,12 +295,25 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               )}
             </button>
 
+            <button
+              type="button"
+              onClick={handleMuteToggle}
+              className={`p-1.5 rounded-xl border transition-colors ${
+                isMuted
+                  ? 'bg-amber-950/60 border-amber-800 text-amber-300 hover:bg-amber-900/60'
+                  : 'bg-slate-800 border-slate-700 text-slate-300 hover:text-white'
+              }`}
+              title={isMuted ? '소리 켜기 (음소거 해제)' : '음소거'}
+            >
+              {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+            </button>
+
             {directLinkUrl && (
               <a
                 href={directLinkUrl}
                 target="_blank"
                 rel="noreferrer"
-                className="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold flex items-center gap-1 transition-colors"
+                className="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold flex items-center gap-1 transition-colors border border-slate-700"
                 title="브라우저 새 창에서 원본 스트리밍"
               >
                 <span>새 창 재생</span>
@@ -422,7 +325,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               <a
                 href={activePlaySrc}
                 download={downloadFileName}
-                className="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold flex items-center gap-1 transition-colors"
+                className="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold flex items-center gap-1 transition-colors border border-slate-700"
                 title="기기에 영상 원본 파일 다운로드"
               >
                 <Download className="w-3 h-3" />
@@ -432,11 +335,11 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
             {onReuploadVideo && (
               <label
-                className="px-2.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1 transition-colors shadow-xs cursor-pointer"
-                title="카카오톡 또는 휴대폰 영상으로 동기화/교체"
+                className="px-2.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1.5 transition-colors shadow-xs cursor-pointer"
+                title="카카오톡 또는 스마트폰 촬영 영상 파일로 즉시 교체 및 동기화"
               >
-                <Upload className="w-3 h-3" />
-                <span>영상 교체</span>
+                <Upload className="w-3.5 h-3.5" />
+                <span>카톡·폰 영상 교체</span>
                 <input
                   type="file"
                   accept="video/*,.mp4,.mov,.MOV,.webm,.m4v,.3gp"

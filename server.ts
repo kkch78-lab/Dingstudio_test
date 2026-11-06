@@ -177,8 +177,12 @@ async function startServer() {
 
   // Static and Streaming routes for uploaded videos
 
-  // Resilient Video Streaming Route with Range Request (HTTP 206) support for iOS Safari, Android Chrome & KakaoTalk
-  app.get('/videos/:filename', (req, res, next) => {
+  // Resilient Video Streaming Route with Range Request (HTTP 206) & HEAD support for iOS Safari, Android Chrome & KakaoTalk
+  app.all('/videos/:filename', (req, res, next) => {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      next();
+      return;
+    }
     try {
       const filename = path.basename(req.params.filename);
       let filePath = path.join(videosDir, filename);
@@ -230,6 +234,18 @@ async function startServer() {
 
       res.setHeader('Accept-Ranges', 'bytes');
       res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Cache-Control', 'public, max-age=3600');
+
+      if (req.method === 'HEAD') {
+        res.writeHead(200, {
+          'Content-Length': fileSize,
+          'Content-Type': contentType,
+          'Accept-Ranges': 'bytes',
+          'Cache-Control': 'public, max-age=3600',
+        });
+        res.end();
+        return;
+      }
 
       if (range) {
         const parts = range.replace(/bytes=/, '').split('-');
@@ -248,6 +264,7 @@ async function startServer() {
           'Accept-Ranges': 'bytes',
           'Content-Length': chunkSize,
           'Content-Type': contentType,
+          'Cache-Control': 'public, max-age=3600',
         });
         fileStream.pipe(res);
       } else {
@@ -255,6 +272,7 @@ async function startServer() {
           'Content-Length': fileSize,
           'Content-Type': contentType,
           'Accept-Ranges': 'bytes',
+          'Cache-Control': 'public, max-age=3600',
         });
         fs.createReadStream(filePath).pipe(res);
       }
